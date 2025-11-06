@@ -350,9 +350,35 @@ services:
     ports:
       - "${POSTGRES_HOST_PORT:-5438}:5432"
 
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - vexa_default
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    # Optional: Add GPU support if you have NVIDIA GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
 volumes:
   redis-data:
   postgres-data:
+  ollama-data:
 
 networks:
   vexa_default:
