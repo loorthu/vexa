@@ -288,11 +288,12 @@ services:
       - ENABLE_ANTHROPIC=${ENABLE_ANTHROPIC:-false}
       - ENABLE_OLLAMA=${ENABLE_OLLAMA:-false}
       - ENABLE_GOOGLE=${ENABLE_GOOGLE:-false}
+      - DISABLE_LLM=${DISABLE_LLM:-true}
       # API Keys
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOG_LEVEL=DEBUG
     init: true
     networks:
