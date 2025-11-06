@@ -29,6 +29,8 @@ load_dotenv()
 ADMIN_API_URL = os.getenv("ADMIN_API_URL")
 BOT_MANAGER_URL = os.getenv("BOT_MANAGER_URL")
 TRANSCRIPTION_COLLECTOR_URL = os.getenv("TRANSCRIPTION_COLLECTOR_URL")
+DNA_BACKEND_URL = os.getenv("DNA_BACKEND_URL")
+DNA_FRONTEND_URL = os.getenv("DNA_FRONTEND_URL")
 
 # --- Validation at startup ---
 if not all([ADMIN_API_URL, BOT_MANAGER_URL, TRANSCRIPTION_COLLECTOR_URL]):
@@ -42,6 +44,17 @@ if not all([ADMIN_API_URL, BOT_MANAGER_URL, TRANSCRIPTION_COLLECTOR_URL]):
         if not var_value
     ]
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+# Note: DNA services are optional - they may not always be available
+if DNA_BACKEND_URL:
+    print(f"DNA Backend service available at: {DNA_BACKEND_URL}")
+else:
+    print("DNA Backend service not configured - /dna_backend/ routes will be unavailable")
+
+if DNA_FRONTEND_URL:
+    print(f"DNA Frontend service available at: {DNA_FRONTEND_URL}")
+else:
+    print("DNA Frontend service not configured - /dna_frontend/ routes will be unavailable")
 
 # Response Models
 # class BotResponseModel(BaseModel): ...
@@ -363,6 +376,37 @@ async def forward_admin_request(request: Request, path: str):
     """Generic forwarder for all admin endpoints."""
     admin_path = f"/admin/{path}" 
     url = f"{ADMIN_API_URL}{admin_path}"
+    return await forward_request(app.state.http_client, request.method, url, request)
+
+# --- DNA Backend Routes --- 
+@app.api_route("/dna_backend/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], 
+               tags=["DNA Backend"],
+               summary="Forward DNA Backend requests",
+               description="Forwards requests prefixed with `/dna_backend` to the DNA Backend service. Requires `X-API-Key`.",
+               dependencies=[Depends(api_key_scheme)])
+async def forward_dna_backend_request(request: Request, path: str):
+    """Generic forwarder for all DNA Backend endpoints."""
+    if not DNA_BACKEND_URL:
+        raise HTTPException(status_code=503, detail="DNA Backend service is not configured")
+    
+    # Remove the /dna_backend prefix and forward the rest of the path
+    dna_path = f"/{path}" if path else "/"
+    url = f"{DNA_BACKEND_URL}{dna_path}"
+    return await forward_request(app.state.http_client, request.method, url, request)
+
+# --- DNA Frontend Routes --- 
+@app.api_route("/dna_frontend/{path:path}", methods=["GET"], 
+               tags=["DNA Frontend"],
+               summary="Forward DNA Frontend requests",
+               description="Forwards requests prefixed with `/dna_frontend` to the DNA Frontend service.")
+async def forward_dna_frontend_request(request: Request, path: str):
+    """Generic forwarder for all DNA Frontend endpoints."""
+    if not DNA_FRONTEND_URL:
+        raise HTTPException(status_code=503, detail="DNA Frontend service is not configured")
+    
+    # Remove the /dna_frontend prefix and forward the rest of the path
+    dna_path = f"/{path}" if path else "/"
+    url = f"{DNA_FRONTEND_URL}{dna_path}"
     return await forward_request(app.state.http_client, request.method, url, request)
 
 # --- Removed internal ID resolution and full transcript fetching from Gateway ---

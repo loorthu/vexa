@@ -10,6 +10,8 @@ services:
       - ADMIN_API_URL=http://admin-api:8001
       - BOT_MANAGER_URL=http://bot-manager:8080
       - TRANSCRIPTION_COLLECTOR_URL=http://transcription-collector:8000
+      - DNA_BACKEND_URL=http://dna-backend:8000
+      - DNA_FRONTEND_URL=http://dna-frontend:5173
       - REDIS_URL=redis://redis:6379/0
       - LOG_LEVEL=DEBUG
     init: true
@@ -19,6 +21,10 @@ services:
       bot-manager:
         condition: service_started
       transcription-collector:
+        condition: service_started
+      dna-backend:
+        condition: service_started
+      dna-frontend:
         condition: service_started
     networks:
       - vexa_default
@@ -117,7 +123,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["3"] # Ensure this is configurable or correct for your setup
+              device_ids: ["0"] # Ensure this is configurable or correct for your setup
               capabilities: [gpu]
     init: true
     depends_on:
@@ -254,6 +260,62 @@ services:
     depends_on:
       api-gateway:
         condition: service_started
+    networks:
+      - vexa_default
+    restart: unless-stopped
+
+  dna-backend:
+    build:
+      context: services/dna/experimental/spi/note_assistant_v2/backend
+      dockerfile: Dockerfile
+    ports:
+      - "${DNA_BACKEND_HOST_PORT:-8058}:8000"
+    environment:
+      # ShotGrid Configuration (deployment_spi_2 branch uses SG_ prefix)
+      - SG_URL=${SG_URL}
+      - SG_SCRIPT_NAME=${SG_SCRIPT_NAME}
+      - SG_API_KEY=${SG_API_KEY}
+      - SG_PLAYLIST_SHOT_FIELD=${SG_PLAYLIST_SHOT_FIELD}
+      - SG_PLAYLIST_VERSION_FIELD=${SG_PLAYLIST_VERSION_FIELD}
+      - SG_PLAYLIST_TYPE_FILTER=${SG_PLAYLIST_TYPE_FILTER}
+      - SG_CSV_VERSION_FIELD=${SG_CSV_VERSION_FIELD}
+      - SG_CSV_SHOT_FIELD=${SG_CSV_SHOT_FIELD}
+      # Service URLs
+      - VEXA_BASE_URL=http://api-gateway:8000
+      - LLM_BACKEND_BASE_URL=${LLM_BACKEND_BASE_URL}
+      # LLM Provider Configuration
+      - ENABLE_OPENAI=${ENABLE_OPENAI:-false}
+      - ENABLE_ANTHROPIC=${ENABLE_ANTHROPIC:-false}
+      - ENABLE_OLLAMA=${ENABLE_OLLAMA:-false}
+      - ENABLE_GOOGLE=${ENABLE_GOOGLE:-false}
+      # API Keys
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - LOG_LEVEL=DEBUG
+    init: true
+    networks:
+      - vexa_default
+    restart: unless-stopped
+
+  dna-frontend:
+    build:
+      context: services/dna/experimental/spi/note_assistant_v2/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${DNA_FRONTEND_HOST_PORT:-8059}:5173"
+    environment:
+      - VITE_MOCK_MODE=false
+      - VITE_BACKEND_URL=http://localhost:${DNA_BACKEND_HOST_PORT:-8058}
+      - VITE_VEXA_API_URL=http://localhost:${API_GATEWAY_HOST_PORT:-8056}
+      - VITE_VEXA_API_KEY=${VEXA_API_KEY}
+      - VITE_VEXA_ADMIN_KEY=${VEXA_ADMIN_KEY}
+      - NODE_ENV=development
+    volumes:
+      - ./services/dna/experimental/spi/note_assistant_v2/frontend/src:/app/src
+      - ./services/dna/experimental/spi/note_assistant_v2/frontend/public:/app/public
+    init: true
     networks:
       - vexa_default
     restart: unless-stopped

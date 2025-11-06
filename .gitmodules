@@ -1,0 +1,4 @@
+[submodule "services/dna"]
+	path = services/dna
+	url = https://github.com/loorthu/dna.git
+	branch = deployment_spi_2
