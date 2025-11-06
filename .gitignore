@@ -143,6 +143,5 @@ test_data/
 *.mp4
 *.txt
 manifest.csv
-services/dna/
 .env.dna.frontend
 .env.dna.backend
