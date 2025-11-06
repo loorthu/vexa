@@ -296,6 +296,8 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOG_LEVEL=DEBUG
     init: true
+    depends_on:
+      - ollama
     networks:
       - vexa_default
     restart: unless-stopped
