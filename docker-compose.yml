@@ -1,4 +1,4 @@
-name: vexa_dev
+name: vexa_dev_loorthu
 services:
   api-gateway:
     build:
