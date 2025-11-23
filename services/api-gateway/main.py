@@ -29,8 +29,6 @@ load_dotenv()
 ADMIN_API_URL = os.getenv("ADMIN_API_URL")
 BOT_MANAGER_URL = os.getenv("BOT_MANAGER_URL")
 TRANSCRIPTION_COLLECTOR_URL = os.getenv("TRANSCRIPTION_COLLECTOR_URL")
-DNA_BACKEND_URL = os.getenv("DNA_BACKEND_URL")
-DNA_FRONTEND_URL = os.getenv("DNA_FRONTEND_URL")
 
 # --- Validation at startup ---
 if not all([ADMIN_API_URL, BOT_MANAGER_URL, TRANSCRIPTION_COLLECTOR_URL]):
@@ -44,17 +42,6 @@ if not all([ADMIN_API_URL, BOT_MANAGER_URL, TRANSCRIPTION_COLLECTOR_URL]):
         if not var_value
     ]
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-
-# Note: DNA services are optional - they may not always be available
-if DNA_BACKEND_URL:
-    print(f"DNA Backend service available at: {DNA_BACKEND_URL}")
-else:
-    print("DNA Backend service not configured - /dna_backend/ routes will be unavailable")
-
-if DNA_FRONTEND_URL:
-    print(f"DNA Frontend service available at: {DNA_FRONTEND_URL}")
-else:
-    print("DNA Frontend service not configured - /dna_frontend/ routes will be unavailable")
 
 # Response Models
 # class BotResponseModel(BaseModel): ...
@@ -177,10 +164,6 @@ async def forward_request(client: httpx.AsyncClient, method: str, url: str, requ
     excluded_headers = {"host", "content-length", "transfer-encoding"}
     headers = {k.lower(): v for k, v in request.headers.items() if k.lower() not in excluded_headers}
     
-    # Debug logging for original request headers
-    print(f"DEBUG: Original request headers: {dict(request.headers)}")
-    print(f"DEBUG: Original query params: {dict(request.query_params)}")
-    
     # Determine target service based on URL path prefix
     is_admin_request = url.startswith(f"{ADMIN_API_URL}/admin")
     
@@ -189,36 +172,21 @@ async def forward_request(client: httpx.AsyncClient, method: str, url: str, requ
         admin_key = request.headers.get("x-admin-api-key")
         if admin_key:
             headers["x-admin-api-key"] = admin_key
-            print(f"DEBUG: Forwarding x-admin-api-key header")
-        else:
-            print(f"DEBUG: No x-admin-api-key header found in request")
     else:
         # Forward client API key for bot-manager and transcription-collector
         client_key = request.headers.get("x-api-key")
         if client_key:
             headers["x-api-key"] = client_key
-            print(f"DEBUG: Forwarding x-api-key header: {client_key[:5]}...")
-        else:
-            print(f"DEBUG: No x-api-key header found in request. Headers: {dict(request.headers)}")
-    
-    # Debug logging for forwarded headers
-    print(f"DEBUG: Forwarded headers: {headers}")
     
     # Forward query parameters
     forwarded_params = dict(request.query_params)
-    if forwarded_params:
-        print(f"DEBUG: Forwarding query params: {forwarded_params}")
-    
     content = await request.body()
     
     try:
-        print(f"DEBUG: Forwarding {method} request to {url}")
         resp = await client.request(method, url, headers=headers, params=forwarded_params or None, content=content)
-        print(f"DEBUG: Response from {url}: status={resp.status_code}")
         # Return downstream response directly (including headers, status code)
         return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
     except httpx.RequestError as exc:
-        print(f"DEBUG: Request error: {exc}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
 
 # --- Root Endpoint --- 
@@ -382,32 +350,33 @@ async def forward_admin_request(request: Request, path: str):
 @app.api_route("/dna_backend/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], 
                tags=["DNA Backend"],
                summary="Forward DNA Backend requests",
-               description="Forwards requests prefixed with `/dna_backend` to the DNA Backend service. Requires `X-API-Key`.",
-               dependencies=[Depends(api_key_scheme)])
+               description="Forwards requests prefixed with `/dna_backend` to integrated DNA Backend functionality.")
+               # Temporarily removed: dependencies=[Depends(api_key_scheme)]
 async def forward_dna_backend_request(request: Request, path: str):
-    """Generic forwarder for all DNA Backend endpoints."""
-    if not DNA_BACKEND_URL:
-        raise HTTPException(status_code=503, detail="DNA Backend service is not configured")
+    """Handle DNA Backend endpoints with direct DNA backend import."""
+    # Import DNA integration here to avoid circular imports
+    from dna_direct_import import dna_direct_integration
     
-    # Remove the /dna_backend prefix and forward the rest of the path
+    # Remove the /dna_backend prefix and get the rest of the path
     dna_path = f"/{path}" if path else "/"
-    url = f"{DNA_BACKEND_URL}{dna_path}"
-    return await forward_request(app.state.http_client, request.method, url, request)
-
-# --- DNA Frontend Routes --- 
-@app.api_route("/dna_frontend/{path:path}", methods=["GET"], 
-               tags=["DNA Frontend"],
-               summary="Forward DNA Frontend requests",
-               description="Forwards requests prefixed with `/dna_frontend` to the DNA Frontend service.")
-async def forward_dna_frontend_request(request: Request, path: str):
-    """Generic forwarder for all DNA Frontend endpoints."""
-    if not DNA_FRONTEND_URL:
-        raise HTTPException(status_code=503, detail="DNA Frontend service is not configured")
     
-    # Remove the /dna_frontend prefix and forward the rest of the path
-    dna_path = f"/{path}" if path else "/"
-    url = f"{DNA_FRONTEND_URL}{dna_path}"
-    return await forward_request(app.state.http_client, request.method, url, request)
+    # Handle different endpoints
+    if dna_path == "/llm-summary" and request.method == "POST":
+        # Get request body
+        request_data = await request.json()
+        result = await dna_direct_integration.llm_summary(request_data)
+        return result
+    elif dna_path == "/available-models" and request.method == "GET":
+        result = await dna_direct_integration.get_available_models()
+        return result
+    elif dna_path == "/health" and request.method == "GET":
+        return {"status": "ok", "message": "DNA Backend integration is running"}
+    elif dna_path == "/config" and request.method == "GET":
+        result = await dna_direct_integration.get_config()
+        return result
+    else:
+        # For any other endpoints, return not found
+        raise HTTPException(status_code=404, detail=f"Endpoint {dna_path} not found in integrated DNA backend")
 
 # --- Removed internal ID resolution and full transcript fetching from Gateway ---
 

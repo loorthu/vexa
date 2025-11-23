@@ -9,3 +9,11 @@ python-multipart==0.0.6
 # Added for Pydantic email validation
 email-validator==2.0.0
 redis==5.0.6
+
+# DNA Backend dependencies for direct imports
+openai
+anthropic
+google-generativeai
+google_auth_oauthlib
+shotgun_api3
+grpcio
