@@ -51,6 +51,8 @@ export type BotConfig = {
   s3Bucket?: string;
   s3AccessKey?: string;
   s3SecretKey?: string;
+  localUserdataPath?: string; // Local filesystem path (alternative to S3 for local dev)
+  cdpUrl?: string;            // If set, attach to existing running browser via CDP instead of launching one
 }
 
 export type BrowserSessionConfig = {
@@ -68,4 +70,5 @@ export type BrowserSessionConfig = {
   workspaceGitRepo?: string;  // e.g. "https://github.com/user/bot-workspace.git"
   workspaceGitToken?: string; // PAT for private repos
   workspaceGitBranch?: string; // default: "main"
+  localUserdataPath?: string; // Local filesystem path (alternative to S3 for local dev)
 }

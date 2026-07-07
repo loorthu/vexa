@@ -66,6 +66,7 @@ profiles:
       INTERNAL_API_SECRET: "${INTERNAL_API_SECRET}"
     ports:
       "9222/tcp": {}         # CDP debug port
+      "6080/tcp": {}         # noVNC web UI
 
   # Claude Code agent — runs Claude CLI for interactive AI sessions
   # Lifetime: agent-api heartbeats via /touch

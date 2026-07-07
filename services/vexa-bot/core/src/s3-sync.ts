@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
-import { existsSync, unlinkSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from 'fs';
+import { join, dirname } from 'path';
 
 export const BROWSER_DATA_DIR = '/tmp/browser-data';
 
@@ -12,12 +12,15 @@ export const BROWSER_CACHE_EXCLUDES = [
   '*/blob_storage/*', '*/File System/*', '*/IndexedDB/*',
 ];
 
+export const CDP_COOKIES_FILE = 'Default/cdp-cookies.json';
+
 export interface S3Config {
   userdataS3Path?: string;
   s3Endpoint?: string;
   s3Bucket?: string;
   s3AccessKey?: string;
   s3SecretKey?: string;
+  localUserdataPath?: string;
 }
 
 function getS3Env(config: S3Config): Record<string, string> {
@@ -59,6 +62,7 @@ const AUTH_ESSENTIAL_FILES = [
   'Default/Login Data For Account-journal',
   'Default/Network Persistent State',
   'Default/Web Data',
+  CDP_COOKIES_FILE,
 ];
 
 const AUTH_ESSENTIAL_DIRS = [
@@ -98,6 +102,81 @@ export function syncBrowserDataToS3(config: S3Config): void {
   }
 
   console.log(`[s3-sync] Uploaded ${uploaded} auth-essential items`);
+}
+
+// --- CDP cookie export/import (fixes session cookie persistence) ---
+// Chromium only persists cookies with Expires/Max-Age to disk. Google uses
+// session cookies (in-memory only), so we export all cookies via CDP before
+// each save and restore them via addCookies() after the browser launches.
+
+export function saveCdpCookies(cookies: object[]): void {
+  const cookiesPath = join(BROWSER_DATA_DIR, CDP_COOKIES_FILE);
+  mkdirSync(dirname(cookiesPath), { recursive: true });
+  writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2));
+  console.log(`[cdp-cookies] Saved ${cookies.length} cookies`);
+}
+
+export function loadCdpCookies(): object[] | null {
+  const cookiesPath = join(BROWSER_DATA_DIR, CDP_COOKIES_FILE);
+  if (!existsSync(cookiesPath)) return null;
+  try {
+    const cookies = JSON.parse(readFileSync(cookiesPath, 'utf-8'));
+    console.log(`[cdp-cookies] Loaded ${cookies.length} cookies`);
+    return cookies;
+  } catch (err: any) {
+    console.log(`[cdp-cookies] Warning: failed to parse cdp-cookies.json: ${err.message}`);
+    return null;
+  }
+}
+
+// --- Local filesystem sync (alternative to S3 for local dev) ---
+
+export function syncBrowserDataFromLocal(localPath: string): void {
+  const src = join(localPath, 'browser-data');
+  if (!existsSync(src)) {
+    console.log(`[local-sync] No existing data at ${src}, starting fresh`);
+    return;
+  }
+  mkdirSync(BROWSER_DATA_DIR, { recursive: true });
+  try {
+    execSync(`cp -a "${src}/." "${BROWSER_DATA_DIR}/"`, { stdio: 'pipe' });
+    console.log(`[local-sync] Restored browser data from ${src}`);
+  } catch (err: any) {
+    console.log(`[local-sync] Warning: restore failed: ${err.message}`);
+  }
+}
+
+export function syncBrowserDataToLocal(localPath: string): void {
+  const dst = join(localPath, 'browser-data');
+  let saved = 0;
+
+  for (const file of AUTH_ESSENTIAL_FILES) {
+    const src = join(BROWSER_DATA_DIR, file);
+    if (!existsSync(src)) continue;
+    const dstFile = join(dst, file);
+    mkdirSync(dirname(dstFile), { recursive: true });
+    try {
+      copyFileSync(src, dstFile);
+      saved++;
+    } catch (err: any) {
+      console.log(`[local-sync] Warning: failed to copy ${file}: ${err.message}`);
+    }
+  }
+
+  for (const dir of AUTH_ESSENTIAL_DIRS) {
+    const src = join(BROWSER_DATA_DIR, dir);
+    if (!existsSync(src)) continue;
+    const dstDir = join(dst, dir);
+    try {
+      mkdirSync(dstDir, { recursive: true });
+      execSync(`cp -a "${src}/." "${dstDir}/"`, { stdio: 'pipe' });
+      saved++;
+    } catch (err: any) {
+      console.log(`[local-sync] Warning: failed to sync ${dir}: ${err.message}`);
+    }
+  }
+
+  console.log(`[local-sync] Saved ${saved} auth-essential items to ${dst}`);
 }
 
 export function cleanStaleLocks(dir: string = BROWSER_DATA_DIR): void {

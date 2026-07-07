@@ -7,7 +7,7 @@ import { getBrowserSessionArgs } from './constans';
 import { BrowserSessionConfig } from './types';
 import { TTSPlaybackService } from './services/tts-playback';
 import { MeetingChatService } from './services/chat';
-import { s3Sync, syncBrowserDataFromS3, syncBrowserDataToS3, cleanStaleLocks, BROWSER_DATA_DIR, BROWSER_CACHE_EXCLUDES } from './s3-sync';
+import { s3Sync, syncBrowserDataFromS3, syncBrowserDataToS3, syncBrowserDataFromLocal, syncBrowserDataToLocal, saveCdpCookies, loadCdpCookies, cleanStaleLocks, BROWSER_DATA_DIR, BROWSER_CACHE_EXCLUDES } from './s3-sync';
 
 const WORKSPACE_DIR = '/workspace';
 
@@ -97,17 +97,26 @@ function syncWorkspaceUp(config: BrowserSessionConfig): void {
   }
 }
 
-function saveAll(config: BrowserSessionConfig): { success: boolean; error?: string } {
+async function saveAll(config: BrowserSessionConfig, context: import('playwright-core').BrowserContext): Promise<{ success: boolean; error?: string }> {
   try {
     console.log('[browser-session] Saving workspace...');
     syncWorkspaceUp(config);
   } catch (err: any) {
     console.error(`[browser-session] Workspace save failed: ${err.message}`);
-    // Workspace failure is non-fatal, continue to browser data
+  }
+  try {
+    const cookies = await context.cookies();
+    saveCdpCookies(cookies);
+  } catch (err: any) {
+    console.error(`[browser-session] CDP cookie export failed: ${err.message}`);
   }
   try {
     console.log('[browser-session] Saving browser data...');
-    syncBrowserDataToS3(config);
+    if (config.localUserdataPath) {
+      syncBrowserDataToLocal(config.localUserdataPath);
+    } else {
+      syncBrowserDataToS3(config);
+    }
     console.log('[browser-session] Save complete');
     return { success: true };
   } catch (err: any) {
@@ -124,7 +133,11 @@ export async function runBrowserSession(config: BrowserSessionConfig): Promise<v
   mkdirSync(WORKSPACE_DIR, { recursive: true });
 
   // Download existing data
-  syncBrowserDataFromS3(config);
+  if (config.localUserdataPath) {
+    syncBrowserDataFromLocal(config.localUserdataPath);
+  } else {
+    syncBrowserDataFromS3(config);
+  }
   syncWorkspaceDown(config);
 
   // Clean stale locks
@@ -137,6 +150,17 @@ export async function runBrowserSession(config: BrowserSessionConfig): Promise<v
     args: getBrowserSessionArgs(),
     viewport: null,
   });
+
+  // Restore CDP session cookies (these aren't persisted to disk by Chromium)
+  const savedCookies = loadCdpCookies();
+  if (savedCookies && savedCookies.length > 0) {
+    try {
+      await context.addCookies(savedCookies as any[]);
+      console.log(`[browser-session] Restored ${savedCookies.length} CDP cookies`);
+    } catch (err: any) {
+      console.log(`[browser-session] Warning: CDP cookie restore failed: ${err.message}`);
+    }
+  }
 
   // Get or create a page
   const pages = context.pages();
@@ -179,7 +203,7 @@ export async function runBrowserSession(config: BrowserSessionConfig): Promise<v
 
       // Legacy plain-string commands (save_storage / stop)
       if (message === 'save_storage') {
-        const result = saveAll(config);
+        const result = await saveAll(config, context);
         if (result.success) {
           await publisher.publish(channelName, 'save_storage:done');
         } else {
@@ -188,7 +212,7 @@ export async function runBrowserSession(config: BrowserSessionConfig): Promise<v
         return;
       } else if (message === 'stop') {
         console.log('[browser-session] Stop command received, saving and exiting...');
-        saveAll(config);
+        await saveAll(config, context);
         await context.close();
         process.exit(0);
         return;
@@ -230,7 +254,7 @@ export async function runBrowserSession(config: BrowserSessionConfig): Promise<v
         ttsPlaybackService.interrupt();
       } else if (command.action === 'leave') {
         console.log('[browser-session] Leave command received, saving and exiting...');
-        saveAll(config);
+        await saveAll(config, context);
         await context.close();
         process.exit(0);
       } else if (command.action === 'chat_send') {
@@ -279,7 +303,7 @@ export async function runBrowserSession(config: BrowserSessionConfig): Promise<v
   // Graceful shutdown
   const shutdown = async () => {
     console.log('[browser-session] Shutting down, saving...');
-    saveAll(config);
+    await saveAll(config, context);
     await context.close();
     process.exit(0);
   };
@@ -289,9 +313,15 @@ export async function runBrowserSession(config: BrowserSessionConfig): Promise<v
 
   // Auto-save browser data every 60s — ensures login state persists
   // even if the container is killed without graceful shutdown
-  const autoSaveInterval = setInterval(() => {
+  const autoSaveInterval = setInterval(async () => {
     try {
-      syncBrowserDataToS3(config);
+      const cookies = await context.cookies();
+      saveCdpCookies(cookies);
+      if (config.localUserdataPath) {
+        syncBrowserDataToLocal(config.localUserdataPath);
+      } else {
+        syncBrowserDataToS3(config);
+      }
     } catch (err: any) {
       console.error(`[browser-session] Auto-save failed: ${err.message}`);
     }

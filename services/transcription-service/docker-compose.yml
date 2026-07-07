@@ -16,6 +16,9 @@ services:
       vexa-network:
         aliases:
           - transcription-service
+      vexa_vexa:
+        aliases:
+          - transcription-service
 
   # Worker 1 (GPU)
   transcription-worker-1:
@@ -97,3 +100,6 @@ networks:
   vexa-network:
     external: true
     name: vexa-network
+  vexa_vexa:
+    external: true
+    name: vexa_vexa

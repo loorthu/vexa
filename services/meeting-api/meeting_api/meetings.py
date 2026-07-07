@@ -795,12 +795,17 @@ async def request_bot(
         await db.commit()
         await db.refresh(new_meeting)
 
-        # S3/MinIO config for browser data persistence.
-        # When MINIO_ENDPOINT is set, browser userdata syncs to S3 (survives restarts).
-        # When empty, userdata lives only in the container filesystem (local-only mode).
+        # Storage config for browser data persistence.
+        # LOCAL_USERDATA_PATH (local filesystem) takes priority over MINIO_ENDPOINT (S3).
+        # When neither is set, userdata lives only in the container filesystem (lost on restart).
+        local_userdata_path = (os.environ.get("LOCAL_USERDATA_PATH") or "").strip()
         minio_endpoint = (os.environ.get("MINIO_ENDPOINT") or "").strip()
         s3_config = {}
-        if minio_endpoint:
+        if local_userdata_path:
+            s3_config = {
+                "localUserdataPath": f"{local_userdata_path}/users/{current_user.id}",
+            }
+        elif minio_endpoint:
             minio_secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
             s3_config = {
                 "userdataS3Path": f"users/{current_user.id}/browser-userdata",
@@ -1114,16 +1119,45 @@ async def request_bot(
     if meeting_data.get("capture_modes"):
         bot_config["captureModes"] = meeting_data["capture_modes"]
     if req.authenticated:
-        minio_endpoint = os.environ.get("MINIO_ENDPOINT", "minio:9000")
-        minio_secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
-        s3_endpoint_url = f"{'https' if minio_secure else 'http'}://{minio_endpoint}"
-        s3_bucket = os.environ.get("MINIO_BUCKET", "vexa-recordings")
         bot_config["authenticated"] = True
-        bot_config["userdataS3Path"] = f"users/{current_user.id}/browser-userdata"
-        bot_config["s3Endpoint"] = s3_endpoint_url
-        bot_config["s3Bucket"] = s3_bucket
-        bot_config["s3AccessKey"] = os.environ.get("MINIO_ACCESS_KEY", "")
-        bot_config["s3SecretKey"] = os.environ.get("MINIO_SECRET_KEY", "")
+        # Prefer CDP attach to an existing browser_session (no cookie management needed).
+        active_bs_result = await db.execute(
+            select(Meeting).where(
+                and_(
+                    Meeting.user_id == current_user.id,
+                    Meeting.platform == "browser_session",
+                    Meeting.status == MeetingStatus.ACTIVE.value,
+                )
+            )
+        )
+        active_bs = active_bs_result.scalars().first()
+        if active_bs:
+            import socket as _socket
+            cdp_name = active_bs.bot_container_id or "localhost"
+            try:
+                cdp_host = _socket.gethostbyname(cdp_name)
+            except Exception:
+                cdp_host = cdp_name
+            bot_config["cdpUrl"] = f"http://{cdp_host}:9223"
+            logger.info(f"[auth-bot] CDP attach mode via browser_session meeting {active_bs.id} at {bot_config['cdpUrl']}")
+        else:
+            # Fall back to cookie-based auth (local fs or S3)
+            local_userdata_path = (os.environ.get("LOCAL_USERDATA_PATH") or "").strip()
+            minio_endpoint = (os.environ.get("MINIO_ENDPOINT") or "").strip()
+            if local_userdata_path:
+                bot_config["localUserdataPath"] = f"{local_userdata_path}/users/{current_user.id}"
+            elif minio_endpoint:
+                minio_secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
+                bot_config["userdataS3Path"] = f"users/{current_user.id}/browser-userdata"
+                bot_config["s3Endpoint"] = f"{'https' if minio_secure else 'http'}://{minio_endpoint}"
+                bot_config["s3Bucket"] = os.environ.get("MINIO_BUCKET", "vexa-recordings")
+                bot_config["s3AccessKey"] = os.environ.get("MINIO_ACCESS_KEY", "")
+                bot_config["s3SecretKey"] = os.environ.get("MINIO_SECRET_KEY", "")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No active browser_session found. Start one first so the bot can join as an authenticated user.",
+                )
     # Remove None values
     bot_config = {k: v for k, v in bot_config.items() if v is not None}
 

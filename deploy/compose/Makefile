@@ -155,6 +155,8 @@ check_docker:
 build-bot-image: check_docker
 	@echo "Building $(DOCKERHUB_USER)/$(BOT_IMAGE):$(BUILD_TAG)..."
 	docker build --platform linux/amd64 -t $(DOCKERHUB_USER)/$(BOT_IMAGE):$(BUILD_TAG) -f $(ROOT)/services/vexa-bot/Dockerfile $(ROOT)/services/vexa-bot
+	docker tag $(DOCKERHUB_USER)/$(BOT_IMAGE):$(BUILD_TAG) $(DOCKERHUB_USER)/$(BOT_IMAGE):latest
+	@echo "Also tagged as $(DOCKERHUB_USER)/$(BOT_IMAGE):latest"
 
 build-lite: check_docker
 	@echo "Building $(DOCKERHUB_USER)/vexa-lite:$(BUILD_TAG)..."

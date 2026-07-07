@@ -21,7 +21,7 @@ import { createClient, RedisClientType } from 'redis';
 import { Page, Browser, BrowserContext } from 'playwright-core';
 import { execSync } from 'child_process';
 import * as net from 'net';
-import { ensureBrowserDataDir, syncBrowserDataFromS3, syncBrowserDataToS3, cleanStaleLocks, BROWSER_DATA_DIR } from './s3-sync';
+import { ensureBrowserDataDir, syncBrowserDataFromS3, syncBrowserDataToS3, syncBrowserDataFromLocal, syncBrowserDataToLocal, saveCdpCookies, loadCdpCookies, cleanStaleLocks, BROWSER_DATA_DIR } from './s3-sync';
 // HTTP imports removed - using unified callback service instead
 
 // Per-speaker transcription pipeline
@@ -809,14 +809,24 @@ async function performGracefulLeave(
     }
   }
 
-  // Sync browser data back to S3 for authenticated bots (preserves cookies/sessions)
-  if (currentBotConfig?.authenticated && currentBotConfig?.userdataS3Path) {
+  // Sync browser data back to storage for authenticated bots (preserves cookies/sessions)
+  if (currentBotConfig?.authenticated && (currentBotConfig?.localUserdataPath || currentBotConfig?.userdataS3Path)) {
     try {
-      log("[Graceful Leave] Syncing browser data to S3 (authenticated bot)...");
-      syncBrowserDataToS3(currentBotConfig);
-      log("[Graceful Leave] Browser data synced to S3.");
+      if (page) {
+        const cookies = await page.context().cookies();
+        saveCdpCookies(cookies);
+      }
+      if (currentBotConfig.localUserdataPath) {
+        log("[Graceful Leave] Syncing browser data to local filesystem (authenticated bot)...");
+        syncBrowserDataToLocal(currentBotConfig.localUserdataPath);
+        log("[Graceful Leave] Browser data synced to local filesystem.");
+      } else {
+        log("[Graceful Leave] Syncing browser data to S3 (authenticated bot)...");
+        syncBrowserDataToS3(currentBotConfig);
+        log("[Graceful Leave] Browser data synced to S3.");
+      }
     } catch (syncErr: any) {
-      log(`[Graceful Leave] Browser data S3 sync failed: ${syncErr.message}`);
+      log(`[Graceful Leave] Browser data sync failed: ${syncErr.message}`);
     }
   }
 
@@ -2312,11 +2322,34 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
     }
   }
 
-  // --- Authenticated bot: use persistent context with userdata from S3 ---
-  if (botConfig.authenticated && botConfig.userdataS3Path) {
-    log('[Bot] Authenticated mode: downloading userdata from S3...');
+  // --- CDP attach mode: connect to an existing running browser (e.g. browser_session) ---
+  // The remote Chrome stays alive when the meeting ends — only the tab is closed.
+  // Force synthetic UI interaction: xdotool targets the bot's own display, not the
+  // remote Chrome's display, so humanized mode would click on the wrong screen.
+  if (botConfig.cdpUrl) {
+    log(`[Bot] CDP attach mode: connecting to existing browser at ${botConfig.cdpUrl}`);
+    botConfig.uiInteractionMode = 'synthetic';
+    try {
+      browserInstance = await chromium.connectOverCDP(botConfig.cdpUrl);
+      const contexts = browserInstance.contexts();
+      const ctx = contexts.length > 0 ? contexts[0] : await browserInstance.newContext();
+      page = await ctx.newPage();
+      log('[Bot] CDP attach: connected to existing browser, new tab opened');
+    } catch (err: any) {
+      log(`[Bot] CDP attach failed: ${err.message}`);
+      throw err;
+    }
+  }
+  // --- Authenticated bot: use persistent context with userdata from local fs or S3 ---
+  else if (botConfig.authenticated && (botConfig.localUserdataPath || botConfig.userdataS3Path)) {
     ensureBrowserDataDir();
-    syncBrowserDataFromS3(botConfig);
+    if (botConfig.localUserdataPath) {
+      log('[Bot] Authenticated mode: loading userdata from local filesystem...');
+      syncBrowserDataFromLocal(botConfig.localUserdataPath);
+    } else {
+      log('[Bot] Authenticated mode: downloading userdata from S3...');
+      syncBrowserDataFromS3(botConfig);
+    }
     cleanStaleLocks(BROWSER_DATA_DIR);
 
     const authArgs = getAuthenticatedBrowserArgs();
@@ -2326,6 +2359,17 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
       args: authArgs,
       viewport: null,
     });
+
+    // Restore CDP session cookies (not persisted to disk by Chromium)
+    const savedCookies = loadCdpCookies();
+    if (savedCookies && savedCookies.length > 0) {
+      try {
+        await context.addCookies(savedCookies as any[]);
+        log(`[Bot] Restored ${savedCookies.length} CDP cookies`);
+      } catch (err: any) {
+        log(`[Bot] Warning: CDP cookie restore failed: ${err.message}`);
+      }
+    }
 
     log('[Bot] Authenticated persistent context launched');
 

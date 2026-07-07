@@ -55,6 +55,8 @@ export const BotConfigSchema = z.object({
   videoReceiveEnabled: z.boolean().optional(),
   cameraEnabled: z.boolean().optional(),
   authenticated: z.boolean().optional(),
+  cdpUrl: z.string().optional(),
+  localUserdataPath: z.string().optional(),
   userdataS3Path: z.string().optional(),
   s3Endpoint: z.string().optional(),
   s3Bucket: z.string().optional(),
@@ -63,6 +65,9 @@ export const BotConfigSchema = z.object({
   workspaceGitRepo: z.string().optional(),
   workspaceGitToken: z.string().optional(),
   workspaceGitBranch: z.string().optional(),
+  showAvatar: z.boolean().optional(),
+  uiInteractionMode: z.enum(["humanized", "synthetic"]).optional(),
+  obfToken: z.string().optional(),
 });
 
 

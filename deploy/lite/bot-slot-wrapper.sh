@@ -25,6 +25,14 @@ set -u
 LOG_DIR="${VEXA_BOT_LOG_DIR:-/var/log/vexa-bots}"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 
+# browser_session bots are for human interaction via VNC — keep them on :99
+# so the VNC server (x11vnc on :99) can see the Chromium window.
+# Only regular meeting bots need display isolation to avoid XTEST collisions.
+if [ "${BOT_MODE:-}" = "browser_session" ]; then
+  echo "[lite-slot] browser_session mode: keeping DISPLAY=:99 for VNC visibility"
+  exec /app/vexa-bot/entrypoint.real.sh "$@"
+fi
+
 # Only self-provision a display if we're on the shared default (:99) or unset.
 # If something upstream already handed us a dedicated display, respect it.
 if [ "${DISPLAY:-:99}" = ":99" ]; then
