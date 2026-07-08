@@ -1,0 +1,23 @@
+# Air-gap override for the GPU transcription stack.
+# Layered on top of services/transcription-service/docker-compose.yml so the
+# workers run from the pre-loaded image instead of building on the prod host.
+#
+#   docker compose \
+#     -f services/transcription-service/docker-compose.yml \
+#     -f docker/airgap/transcription.prod.yml \
+#     up -d --no-build
+services:
+  transcription-worker-1:
+    image: vexaai/vexa-transcription:${IMAGE_TAG:-latest}
+    pull_policy: never
+    # Force HuggingFace to use the shipped model cache only — no network
+    # probe for a newer revision (which would time out on an air-gapped host).
+    environment:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+  transcription-worker-2:
+    image: vexaai/vexa-transcription:${IMAGE_TAG:-latest}
+    pull_policy: never
+    environment:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
