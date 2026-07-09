@@ -35,10 +35,15 @@ echo "==> Using IMAGE_TAG=$IMAGE_TAG  BROWSER_IMAGE=$BROWSER_IMAGE"
 #    single-label service names (e.g. redis) resolve to the internal containers
 #    instead of colliding with corporate records (e.g. redis.spimageworks.com).
 echo "==> Starting core stack..."
+# tts-service (Piper TTS) is disabled via --scale tts-service=0: it downloads
+# voice models from the internet at startup (fails + crash-loops on an
+# air-gapped host) and DNA does not use text-to-speech. Nothing depends_on it.
+# To enable TTS later: pre-seed the Piper voices into the tts-voices volume and
+# drop the --scale flag.
 docker compose --env-file .env \
   -f deploy/compose/docker-compose.yml \
   -f docker/airgap/dns.prod.yml \
-  up -d --no-build
+  up -d --no-build --scale tts-service=0
 
 # 2) Transcription needs two external networks. `vexa_vexa` was just created by
 #    the core stack; `vexa-network` is external too — create it if missing.
