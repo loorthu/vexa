@@ -26,7 +26,7 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$ROOT/.env"
 
 # Help before any preflight so it works without a running stack.
-case "${1:-}" in -h|--help|help) sed -n '19,24p' "$0"; exit 0 ;; esac
+case "${1:-}" in -h|--help|help) sed -n '17,21p' "$0"; exit 0 ;; esac
 
 getenv() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]'; }
 
@@ -234,6 +234,6 @@ case "${1:-ensure}" in
     list|ls)        cmd_list ;;
     reset|fresh)    cmd_reset ;;
     stop|clear)     cmd_stop ;;
-    -h|--help|help) sed -n '19,24p' "$0" ;;
-    *) echo "Unknown command: $1" >&2; sed -n '19,24p' "$0" >&2; exit 1 ;;
+    -h|--help|help) sed -n '17,21p' "$0" ;;
+    *) echo "Unknown command: $1" >&2; sed -n '17,21p' "$0" >&2; exit 1 ;;
 esac
