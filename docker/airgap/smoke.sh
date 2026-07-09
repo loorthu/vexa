@@ -94,10 +94,11 @@ else
   report no ".env VEXA_API_KEY" "not set in .env"; ENVKEY_BAD=1
 fi
 
-# 6) transcription LB reachable from inside the stack
-TX="$(docker compose --env-file .env -f deploy/compose/docker-compose.yml exec -T meeting-api \
-        python -c "import urllib.request as u;print(u.urlopen('http://transcription-service/health',timeout=5).status)" 2>/dev/null || echo ERR)"
-expect "$TX" 200 "transcription /health"
+# 6) transcription LB (whisper) — published on host port 8083 by the
+#    transcription compose. Hit it directly with curl so this check needs no
+#    docker/sudo (the whole smoke test is then plain curl).
+TX_PORT="${TRANSCRIPTION_LB_PORT:-8083}"
+expect "$(code "http://localhost:${TX_PORT}/health")" 200 "transcription /health"
 
 echo ""
 echo "== $pass passed, $fail failed =="
