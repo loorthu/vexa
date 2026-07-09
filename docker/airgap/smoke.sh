@@ -81,16 +81,17 @@ fi
 #    use. GET /meetings needs the 'browser' scope; an unregistered key -> 401,
 #    a valid-but-under-scoped (e.g. bot-only) key -> 403.
 EKEY="$(getenv VEXA_API_KEY)"
+ENVKEY_BAD=0
 if [ -n "$EKEY" ]; then
   EC="$(code "$GW/meetings" -H "X-API-Key: $EKEY")"
   case "$EC" in
     200) report ok ".env VEXA_API_KEY" "valid (browser scope)";;
-    401) report no ".env VEXA_API_KEY" "401 — key not registered / invalid";;
-    403) report no ".env VEXA_API_KEY" "403 — valid but missing 'browser' scope";;
-    *)   report no ".env VEXA_API_KEY" "got $EC (want 200)";;
+    401) report no ".env VEXA_API_KEY" "401 — key not registered / invalid"; ENVKEY_BAD=1;;
+    403) report no ".env VEXA_API_KEY" "403 — valid but missing 'browser' scope"; ENVKEY_BAD=1;;
+    *)   report no ".env VEXA_API_KEY" "got $EC (want 200)"; ENVKEY_BAD=1;;
   esac
 else
-  report no ".env VEXA_API_KEY" "not set in .env"
+  report no ".env VEXA_API_KEY" "not set in .env"; ENVKEY_BAD=1
 fi
 
 # 6) transcription LB reachable from inside the stack
@@ -100,4 +101,10 @@ expect "$TX" 200 "transcription /health"
 
 echo ""
 echo "== $pass passed, $fail failed =="
+if [ "${ENVKEY_BAD:-0}" -eq 1 ]; then
+  echo ""
+  echo "  Tip: the .env VEXA_API_KEY isn't valid on this Vexa (likely from another"
+  echo "       deployment's DB). Mint a fresh one and write it into .env:"
+  echo "         ./docker/airgap/mint-token.sh"
+fi
 [ "$fail" -eq 0 ]
