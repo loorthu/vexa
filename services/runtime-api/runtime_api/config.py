@@ -11,6 +11,13 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # Docker backend
 DOCKER_HOST = os.getenv("DOCKER_HOST", "unix:///var/run/docker.sock")
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "bridge")
+# DNS resolution options applied to spawned bot/agent containers. On hosts whose
+# resolver carries a corporate search domain, a single-label service name like
+# "redis" gets suffixed to "redis.<corp-domain>" and can resolve to an external
+# corporate host (-> EHOSTUNREACH). ndots:0 makes such names resolve as-is via
+# Docker's embedded DNS. Comma-separated; set empty to disable.
+BOT_DNS_OPTIONS = [o.strip() for o in os.getenv("BOT_DNS_OPTIONS", "ndots:0").split(",") if o.strip()]
+BOT_DNS_SEARCH = [s.strip() for s in os.getenv("BOT_DNS_SEARCH", "").split(",") if s.strip()]
 
 # Kubernetes backend
 K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", os.getenv("POD_NAMESPACE", "default"))

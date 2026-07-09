@@ -164,6 +164,15 @@ class DockerBackend(Backend):
         if spec.mounts:
             host_config["Binds"] = spec.mounts
 
+        # DNS options for the spawned container so single-label service names
+        # (e.g. "redis") resolve via Docker's embedded DNS rather than being
+        # suffixed with a corporate search domain — which can resolve to an
+        # external host and fail with EHOSTUNREACH. See config.BOT_DNS_OPTIONS.
+        if config.BOT_DNS_OPTIONS:
+            host_config["DnsOptions"] = config.BOT_DNS_OPTIONS
+        if config.BOT_DNS_SEARCH:
+            host_config["DnsSearch"] = config.BOT_DNS_SEARCH
+
         # GPU passthrough
         if spec.gpu:
             if spec.gpu_type == "vaapi":
