@@ -77,7 +77,23 @@ else
   report no "GET /bots/status" "skipped (no token)"
 fi
 
-# 5) transcription LB reachable from inside the stack
+# 5) the VEXA_API_KEY already in .env — what browser-session.sh and API clients
+#    use. GET /meetings needs the 'browser' scope; an unregistered key -> 401,
+#    a valid-but-under-scoped (e.g. bot-only) key -> 403.
+EKEY="$(getenv VEXA_API_KEY)"
+if [ -n "$EKEY" ]; then
+  EC="$(code "$GW/meetings" -H "X-API-Key: $EKEY")"
+  case "$EC" in
+    200) report ok ".env VEXA_API_KEY" "valid (browser scope)";;
+    401) report no ".env VEXA_API_KEY" "401 — key not registered / invalid";;
+    403) report no ".env VEXA_API_KEY" "403 — valid but missing 'browser' scope";;
+    *)   report no ".env VEXA_API_KEY" "got $EC (want 200)";;
+  esac
+else
+  report no ".env VEXA_API_KEY" "not set in .env"
+fi
+
+# 6) transcription LB reachable from inside the stack
 TX="$(docker compose --env-file .env -f deploy/compose/docker-compose.yml exec -T meeting-api \
         python -c "import urllib.request as u;print(u.urlopen('http://transcription-service/health',timeout=5).status)" 2>/dev/null || echo ERR)"
 expect "$TX" 200 "transcription /health"
