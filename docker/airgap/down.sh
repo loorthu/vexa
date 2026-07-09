@@ -11,7 +11,7 @@ EXTRA=""
 [ "${1:-}" = "--volumes" ] && EXTRA="--volumes"
 
 echo "==> Stopping transcription workers..."
-docker compose --env-file .env \
+docker compose -p vexa-transcription --env-file .env \
   -f services/transcription-service/docker-compose.yml \
   -f docker/airgap/transcription.prod.yml \
   down $EXTRA 2>/dev/null || true

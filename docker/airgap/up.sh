@@ -45,7 +45,9 @@ docker compose --env-file .env \
 docker network inspect vexa-network >/dev/null 2>&1 || docker network create vexa-network >/dev/null
 
 echo "==> Starting GPU transcription workers..."
-docker compose --env-file .env \
+# Pinned project name so up/down manage the same stack regardless of the repo
+# directory name (which would otherwise become the default project).
+docker compose -p vexa-transcription --env-file .env \
   -f services/transcription-service/docker-compose.yml \
   -f docker/airgap/transcription.prod.yml \
   up -d --no-build
