@@ -1,0 +1,24 @@
+# Air-gap DNS overlay.
+#
+# On hosts whose resolver carries a corporate search domain (e.g.
+# spimageworks.com), a bare single-label service name like `redis` gets
+# expanded to `redis.spimageworks.com` FIRST. If that record exists (there is a
+# real corporate Redis server), the container connects to the external host
+# instead of the internal one and fails with "No route to host". `postgres`
+# survived only because there was no matching corporate record.
+#
+# Fix, per-container and portable (no host/daemon changes):
+#   dns_opt ndots:0   -> single-label names are queried as-is, so Docker's
+#                        embedded DNS answers `redis` internally.
+#   dns_search "."    -> the corporate search domain is never appended.
+# External FQDNs (with dots) still resolve normally.
+#
+# Applied to every service that resolves another service by name.
+services:
+  runtime-api: { dns_search: ["."], dns_opt: ["ndots:0"] }
+  api-gateway: { dns_search: ["."], dns_opt: ["ndots:0"] }
+  meeting-api: { dns_search: ["."], dns_opt: ["ndots:0"] }
+  admin-api:   { dns_search: ["."], dns_opt: ["ndots:0"] }
+  dashboard:   { dns_search: ["."], dns_opt: ["ndots:0"] }
+  mcp:         { dns_search: ["."], dns_opt: ["ndots:0"] }
+  tts-service: { dns_search: ["."], dns_opt: ["ndots:0"] }

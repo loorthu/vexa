@@ -31,9 +31,14 @@ export IMAGE_TAG="$TAG"
 export BROWSER_IMAGE="vexaai/vexa-bot:$TAG"
 echo "==> Using IMAGE_TAG=$IMAGE_TAG  BROWSER_IMAGE=$BROWSER_IMAGE"
 
-# 1) Core stack.
+# 1) Core stack. dns.prod.yml disables the corporate DNS search-domain suffix so
+#    single-label service names (e.g. redis) resolve to the internal containers
+#    instead of colliding with corporate records (e.g. redis.spimageworks.com).
 echo "==> Starting core stack..."
-docker compose --env-file .env -f deploy/compose/docker-compose.yml up -d --no-build
+docker compose --env-file .env \
+  -f deploy/compose/docker-compose.yml \
+  -f docker/airgap/dns.prod.yml \
+  up -d --no-build
 
 # 2) Transcription needs two external networks. `vexa_vexa` was just created by
 #    the core stack; `vexa-network` is external too — create it if missing.

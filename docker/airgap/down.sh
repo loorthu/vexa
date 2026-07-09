@@ -17,6 +17,9 @@ docker compose --env-file .env \
   down $EXTRA 2>/dev/null || true
 
 echo "==> Stopping core stack..."
-docker compose --env-file .env -f deploy/compose/docker-compose.yml down $EXTRA
+docker compose --env-file .env \
+  -f deploy/compose/docker-compose.yml \
+  -f docker/airgap/dns.prod.yml \
+  down $EXTRA
 
 echo "Done."
