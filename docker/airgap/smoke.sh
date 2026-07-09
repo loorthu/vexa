@@ -47,18 +47,25 @@ if [ "$AC" != 200 ] && [ -n "$ADMIN_ALT" ]; then
 fi
 expect "$AC" 200 "GET /admin/users"
 
-# 3) create throwaway user + scoped token (note: UID is readonly in bash)
-USER_ID="$(curl -sS -X POST "$GW/admin/users" -H "X-Admin-API-Key: $ADMIN" \
-             -H "Content-Type: application/json" \
-             -d '{"email":"smoke@test.local","name":"smoke"}' 2>/dev/null \
-           | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
-TOKEN="$(curl -sS -X POST "$GW/admin/users/$USER_ID/tokens?scopes=bot,browser,tx&name=smoke" \
-             -H "X-Admin-API-Key: $ADMIN" 2>/dev/null \
-           | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)"
+# 3) create throwaway user + scoped token.
+#    - email must use a real TLD (email-validator rejects reserved ones like .local)
+#    - parse with grep/sed so we don't depend on python3 being installed
+#    - note: UID is readonly in bash, hence USER_ID
+USER_JSON="$(curl -sS -X POST "$GW/admin/users" -H "X-Admin-API-Key: $ADMIN" \
+               -H "Content-Type: application/json" \
+               -d '{"email":"smoke@example.com","name":"smoke"}' 2>/dev/null)"
+USER_ID="$(printf '%s' "$USER_JSON" \
+           | grep -oE '"id"[[:space:]]*:[[:space:]]*"?[A-Za-z0-9_-]+' | head -1 \
+           | sed -E 's/.*[^A-Za-z0-9_-]([A-Za-z0-9_-]+)$/\1/')"
+TOKEN_JSON="$(curl -sS -X POST "$GW/admin/users/$USER_ID/tokens?scopes=bot,browser,tx&name=smoke" \
+               -H "X-Admin-API-Key: $ADMIN" 2>/dev/null)"
+TOKEN="$(printf '%s' "$TOKEN_JSON" \
+         | grep -oE '"token"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+         | sed -E 's/.*"([^"]+)"$/\1/')"
 if [ -n "$USER_ID" ] && [ -n "$TOKEN" ]; then
   report ok "create user+token" "id=$USER_ID token=${TOKEN:0:12}..."
 else
-  report no "create user+token" "no id/token returned"
+  report no "create user+token" "resp: $(printf '%s' "$USER_JSON" | head -c 160)"
 fi
 
 # 4) authenticated endpoints
