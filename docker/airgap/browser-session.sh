@@ -52,6 +52,15 @@ if ! curl -sf -o /dev/null "$VEXA_API_URL/meetings" -H "X-API-Key: $VEXA_API_KEY
     exit 1
 fi
 
+# Docker is required to read the session container's IP. On hosts where docker
+# needs root, run this script with sudo — otherwise the session gets created
+# but the IP lookup fails.
+if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: cannot access Docker (needed to read the session container IP)." >&2
+    echo "       Re-run with sudo:  sudo $0" >&2
+    exit 1
+fi
+
 _get_sessions() {
     curl -sf "$VEXA_API_URL/meetings" -H "X-API-Key: $VEXA_API_KEY" 2>/dev/null \
     | python3 -c "
@@ -128,6 +137,7 @@ for net in nets.values():
 
 if [[ -z "$IP" ]]; then
     echo "ERROR: Could not get IP for container '$CONTAINER'."
+    echo "       If docker needs root on this host, re-run: sudo $0"
     exit 1
 fi
 
