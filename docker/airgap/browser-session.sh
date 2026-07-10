@@ -16,7 +16,7 @@
 #
 # Usage:
 #   ./browser-session.sh            Ensure one session is running; print its VNC URL (default).
-#   ./browser-session.sh list       List active browser_sessions and their container state.
+#   ./browser-session.sh list [all] List bot containers (auth + meeting) with VNC/CDP links (all=incl. exited).
 #   ./browser-session.sh reset      Stop ALL sessions (+ stray containers), then start a fresh one.
 #   ./browser-session.sh stop       Stop ALL sessions without starting a new one.
 set -e
@@ -173,21 +173,46 @@ stop_all() {
 
 # --- commands --------------------------------------------------------------
 
+# VNC/CDP link helpers. A published host port (browser_session publishes 6080)
+# -> localhost:<port>; otherwise the container's internal IP (meeting bots keep
+# VNC on 6080 but don't publish it).
+_port_pub() { docker port "$1" "$2" 2>/dev/null | head -1 | sed 's/.*://'; }
+_vnc_url() {  # $1=id  $2=ip
+    local p; p="$(_port_pub "$1" 6080/tcp)"
+    if [[ -n "$p" ]]; then echo "http://localhost:${p}/vnc_auto.html"
+    elif [[ -n "$2" ]]; then echo "http://${2}:6080/vnc_auto.html"
+    else echo "-"; fi
+}
+_cdp_addr() {  # $1=id  $2=ip
+    local p; p="$(_port_pub "$1" 9222/tcp)"
+    if [[ -n "$p" ]]; then echo "localhost:${p}"
+    elif [[ -n "$2" ]]; then echo "${2}:9222"
+    else echo "-"; fi
+}
+
+# List ALL runtime-managed bot containers (auth browser_session + meeting bots)
+# with their VNC + CDP links — for troubleshooting.
 cmd_list() {
-    local sessions; sessions="$(_get_sessions)"
-    if [[ -z "$sessions" ]]; then
-        echo "No active browser_sessions."
-        return 0
-    fi
-    printf "%-7s  %-30s  %-22s  %s\n" "MEETING" "CONTAINER" "NATIVE_ID" "STATE"
-    while IFS=$'\t' read -r id container native_id; do
-        [[ -z "$id" ]] && continue
-        local state
-        if _container_running "$container"; then state="running"
-        elif _container_exists "$container"; then state="stopped"
-        else state="MISSING (ghost)"; fi
-        printf "%-7s  %-30s  %-22s  %s\n" "$id" "$container" "$native_id" "$state"
-    done <<< "$sessions"
+    local psq="-q"
+    [[ "${1:-}" == "all" || "${1:-}" == "-a" ]] && psq="-aq"   # include exited bots
+    local ids; ids="$(docker ps $psq --filter 'label=runtime.managed=true' 2>/dev/null)"
+    if [[ -z "$ids" ]]; then echo "No bot containers."; return 0; fi
+    printf "%-28s  %-15s  %-8s  %-38s  %s\n" "CONTAINER" "TYPE" "STATUS" "VNC" "CDP"
+    local id name type status ip
+    for id in $ids; do
+        name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')"
+        status="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null)"
+        ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$id" 2>/dev/null | awk '{print $1}')"
+        case "$name" in
+            browser-session-*) type="browser_session";;
+            meeting-*)         type="meeting";;
+            *)                 type="other";;
+        esac
+        printf "%-28s  %-15s  %-8s  %-38s  %s\n" "$name" "$type" "$status" "$(_vnc_url "$id" "$ip")" "$(_cdp_addr "$id" "$ip")"
+    done
+    echo ""
+    echo "  'localhost:<port>' links work from the Docker host; 'http://172.x:6080'"
+    echo "  links are Docker-internal (open from the host or a machine on that network)."
 }
 
 cmd_reset() {
@@ -231,7 +256,7 @@ cmd_ensure() {
 
 case "${1:-ensure}" in
     ""|ensure)      cmd_ensure ;;
-    list|ls)        cmd_list ;;
+    list|ls)        cmd_list "${2:-}" ;;
     reset|fresh)    cmd_reset ;;
     stop|clear)     cmd_stop ;;
     -h|--help|help) sed -n '17,21p' "$0" ;;
