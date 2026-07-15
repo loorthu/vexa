@@ -26,6 +26,7 @@
  */
 import {
   launchPersistentBrowser,
+  attachOverCDP,
   syncBrowserDataFromS3,
   cleanStaleLocks,
   getAuthenticatedBrowserArgs,
@@ -86,33 +87,59 @@ export interface BrowserSession {
 }
 
 /**
- * Launch the browser the bot joins through. Authenticated bots restore the persistent profile
- * from S3 first (so they join as a signed-in user); guest bots launch a fresh persistent context.
- * Always uses getJoinBrowserArgs() (the join lane's canonical flag set) merged with the
- * remote-browser auth args, so the page the JoinDriver receives is configured identically to
- * what @vexa/join expects.  // L4 (O6/VM): live-validated against a real meeting.
+ * Acquire the browser the bot joins through — two mutually exclusive modes:
+ *   • CDP attach (inv.cdpUrl set): connect to an already-running SESSION browser (kept alive
+ *     by browser-session.sh, logged in once over VNC) and open a tab in its existing context.
+ *     No launch, no profile dir; teardown closes only the tab so the shared session survives.
+ *     NOTE: the session browser must already carry the fake-device / autoplay flags
+ *     (getBrowserSessionArgs) — getJoinBrowserArgs() below does NOT apply on this branch, since
+ *     we don't launch. session.ts is responsible for launching it with the right flags.
+ *   • Launch (default): authenticated bots restore the persistent profile from S3 first (so they
+ *     join as a signed-in user); guest bots launch a fresh persistent context. Uses
+ *     getJoinBrowserArgs() (the join lane's canonical flag set) merged with the remote-browser
+ *     auth args, so the page the JoinDriver receives is configured as @vexa/join expects.
+ * Both modes then share the identical capture/init-script wiring below.
+ * // L4 (O6/VM): live-validated against a real meeting.
  */
 export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
-  // Every bot gets its OWN profile dir — concurrent bots sharing one dir die on Chromium's
-  // SingletonLock (#478: joining → failed <1s, "Opening in existing browser session").
-  // Authenticated: restore the S3 userdata into this bot's dir before launch (index.ts:2313–2347).
-  const dataDir = makeEphemeralProfileDir();
-  if (inv.authenticated && inv.userdataS3Path) {
-    syncBrowserDataFromS3({
-      userdataS3Path: inv.userdataS3Path,
-      s3Endpoint: inv.s3Endpoint,
-      s3Bucket: inv.s3Bucket,
-      s3AccessKey: inv.s3AccessKey,
-      s3SecretKey: inv.s3SecretKey,
-    }, dataDir);
-    cleanStaleLocks(dataDir);
-  }
+  let context: BrowserContext;
+  let page: Page;
+  let closeBrowser: () => Promise<void>;
 
-  // getAuthenticatedBrowserArgs() is the minimal clean set remote-browser uses for signed-in
-  // joins; getJoinBrowserArgs() adds the fake-device / autoplay flags the join lane needs. The
-  // join args win on conflict (later wins in Chromium arg parsing).
-  const args = [...getAuthenticatedBrowserArgs(), ...getJoinBrowserArgs()];
-  const { context, page } = await launchPersistentBrowser({ dataDir, args });
+  if (inv.cdpUrl) {
+    // CDP attach: borrow the running session browser; close the tab, never the context.
+    const att = await attachOverCDP(inv.cdpUrl);
+    context = att.context;
+    page = att.page;
+    closeBrowser = () => att.disconnect();
+  } else {
+    // Every bot gets its OWN profile dir — concurrent bots sharing one dir die on Chromium's
+    // SingletonLock (#478: joining → failed <1s, "Opening in existing browser session").
+    // Authenticated: restore the S3 userdata into this bot's dir before launch (index.ts:2313–2347).
+    const dataDir = makeEphemeralProfileDir();
+    if (inv.authenticated && inv.userdataS3Path) {
+      syncBrowserDataFromS3({
+        userdataS3Path: inv.userdataS3Path,
+        s3Endpoint: inv.s3Endpoint,
+        s3Bucket: inv.s3Bucket,
+        s3AccessKey: inv.s3AccessKey,
+        s3SecretKey: inv.s3SecretKey,
+      }, dataDir);
+      cleanStaleLocks(dataDir);
+    }
+
+    // getAuthenticatedBrowserArgs() is the minimal clean set remote-browser uses for signed-in
+    // joins; getJoinBrowserArgs() adds the fake-device / autoplay flags the join lane needs. The
+    // join args win on conflict (later wins in Chromium arg parsing).
+    const args = [...getAuthenticatedBrowserArgs(), ...getJoinBrowserArgs()];
+    const launched = await launchPersistentBrowser({ dataDir, args });
+    context = launched.context;
+    page = launched.page;
+    closeBrowser = async () => {
+      await context.close().catch(() => { /* best-effort */ });
+      removeProfileDir(dataDir);   // per-bot dir — leaking one per bot fills the disk in vexa-lite
+    };
+  }
 
   // Voice-agent gate the page reads to decide whether to keep the mic hot (production parity).
   await context.addInitScript(`window.__vexa_voice_agent_enabled = ${!!inv.voiceAgentEnabled};`);
@@ -175,10 +202,7 @@ export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
   return {
     context,
     page,
-    async close() {
-      await context.close().catch(() => { /* best-effort */ });
-      removeProfileDir(dataDir);   // per-bot dir — leaking one per bot fills the disk in vexa-lite
-    },
+    close: closeBrowser,
   };
 }
 

@@ -27,6 +27,9 @@ export {
   ensureBrowserDataDir,
   makeEphemeralProfileDir,
   removeProfileDir,
+  saveCdpCookies,
+  loadCdpCookies,
+  CDP_COOKIES_FILE,
 } from './session-store';
 export type { S3Config } from './session-store';
 
@@ -36,6 +39,9 @@ export { getAuthenticatedBrowserArgs, getBrowserSessionArgs, CDP_DEBUG_ARGS } fr
 // The one true persistent-context launch
 export { launchPersistentBrowser } from './browser';
 export type { LaunchPersistentOptions } from './browser';
+// The dual: attach to an already-running session browser over CDP (no launch, no profile).
+export { attachOverCDP } from './attach';
+export type { CdpAttachment } from './attach';
 // Re-export the Playwright handles this brick's API traffics in, so consumers (the bot
 // composition root + its adapters) type against ONE Page/BrowserContext without a direct
 // playwright dependency of their own.

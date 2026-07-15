@@ -52,7 +52,8 @@
         "s3Endpoint": { "type": "string" },
         "s3Bucket": { "type": "string" },
         "s3AccessKey": { "type": "string", "description": "SECRET; placeholder in goldens" },
-        "s3SecretKey": { "type": "string", "description": "SECRET; placeholder in goldens" }
+        "s3SecretKey": { "type": "string", "description": "SECRET; placeholder in goldens" },
+        "cdpUrl": { "type": "string", "format": "uri", "description": "attach the bot to an already-running session browser over CDP (e.g. http://vexa-browser-session-<uid>:9222) instead of launching one; takes precedence over authenticated/userdataS3Path" }
       }
     }
   }

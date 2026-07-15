@@ -141,6 +141,8 @@ def build_invocation(
     recording_upload_url: Optional[str] = None,
     transcription_service_url: Optional[str] = None,
     transcription_service_token: Optional[str] = None,
+    cdp_url: Optional[str] = None,
+    authenticated: bool = False,
 ) -> dict:
     """Assemble the bot's ``invocation.v1`` Invocation (the parent's ``BOT_CONFIG``).
 
@@ -169,6 +171,11 @@ def build_invocation(
         "meetingApiCallbackUrl": meeting_api_callback_url,
         "internalSecret": internal_secret,
         "automaticLeave": automatic_leave,
+        # CDP attach: when set, the bot borrows a running session browser instead of launching one.
+        "cdpUrl": cdp_url,
+        # Authenticated join: tells the join layer to skip the guest name-entry path and join via the
+        # signed-in Google identity ("Join now"). Omitted (→ guest flow) when False.
+        "authenticated": authenticated or None,
     }
     invocation = {k: v for k, v in invocation.items() if v is not None}
     conforms_invocation(invocation)

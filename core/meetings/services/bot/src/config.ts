@@ -86,6 +86,9 @@ export interface Invocation {
   s3Bucket?: string;
   s3AccessKey?: string;
   s3SecretKey?: string;
+  // ── CDP attach: borrow an already-running session browser instead of launching one.
+  //    When set, takes precedence over authenticated/userdataS3Path (see capture-bridge). ──
+  cdpUrl?: string;
 }
 
 /** Thrown when VEXA_BOT_CONFIG is missing / not JSON / off-contract. The composition root

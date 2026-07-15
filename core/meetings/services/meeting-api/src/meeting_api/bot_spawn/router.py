@@ -220,6 +220,10 @@ def build_router(repo: MeetingRepo, runtime: RuntimeClient) -> APIRouter:
                 # has no additionalProperties:false), so the wire is not rejected; documenting it as
                 # a public typed field needs a vN+1 (lane:contract) — see the bot_spawn README.
                 continue_meeting=bool(body.get("continue_meeting", False)),
+                # authenticated (CDP attach): join via the user's running session browser. Rides the
+                # OPEN api.v1 request body (MeetingCreate has no additionalProperties:false), same as
+                # continue_meeting above; promoting it to a typed public field needs a lane:contract vN+1.
+                authenticated=bool(body.get("authenticated", False)),
                 max_concurrent=max_concurrent,
                 webhook_url=x_user_webhook_url,
                 webhook_secret=x_user_webhook_secret,

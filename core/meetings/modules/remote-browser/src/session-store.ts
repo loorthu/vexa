@@ -13,8 +13,9 @@
  * durable store. Cache/GPU/IndexedDB junk is excluded — ~200KB, not the full profile.
  */
 import { execSync } from 'child_process';
-import { existsSync, unlinkSync, mkdirSync, cpSync, mkdtempSync, rmSync, readdirSync, readlinkSync, statSync } from 'fs';
+import { existsSync, unlinkSync, mkdirSync, cpSync, mkdtempSync, rmSync, readdirSync, readlinkSync, statSync, writeFileSync, readFileSync } from 'fs';
 import { join, dirname, basename } from 'path';
+import type { Cookie } from 'playwright';
 
 export const BROWSER_DATA_DIR = process.env.BROWSER_DATA_DIR || '/tmp/browser-data';
 
@@ -209,6 +210,36 @@ export function loadSessionLocal(srcDir: string, destDataDir: string = BROWSER_D
   }
   console.log(`[session-store] Loaded ${n} auth-essential items ← ${srcDir}`);
   return n;
+}
+
+// ── CDP session-cookie snapshot ───────────────────────────────────────────
+// Chromium keeps SESSION cookies (no explicit expiry — Google's auth relies on several)
+// in memory only; they are never written to the profile's `Cookies` file, so a save-then-
+// reload of the profile alone loses the login. The long-lived browser-session runner
+// therefore snapshots the full cookie set (context.cookies()) to JSON alongside the profile,
+// and re-injects it (context.addCookies()) on the next launch — so the login survives a
+// container restart, even an ungraceful SIGKILL. The meeting bot's CDP-attach path does NOT
+// use these (it reads cookies from the live attached browser); this is session-runner only.
+export const CDP_COOKIES_FILE = 'Default/cdp-cookies.json';
+
+export function saveCdpCookies(cookies: Cookie[], dataDir: string = BROWSER_DATA_DIR): void {
+  const cookiesPath = join(dataDir, CDP_COOKIES_FILE);
+  mkdirSync(dirname(cookiesPath), { recursive: true });
+  writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2));
+  console.log(`[cdp-cookies] Saved ${cookies.length} cookies`);
+}
+
+export function loadCdpCookies(dataDir: string = BROWSER_DATA_DIR): Cookie[] | null {
+  const cookiesPath = join(dataDir, CDP_COOKIES_FILE);
+  if (!existsSync(cookiesPath)) return null;
+  try {
+    const cookies = JSON.parse(readFileSync(cookiesPath, 'utf-8')) as Cookie[];
+    console.log(`[cdp-cookies] Loaded ${cookies.length} cookies`);
+    return cookies;
+  } catch (err: any) {
+    console.log(`[cdp-cookies] Warning: failed to parse cdp-cookies.json: ${err.message}`);
+    return null;
+  }
 }
 
 // ── Profile hygiene ───────────────────────────────────────────────────────

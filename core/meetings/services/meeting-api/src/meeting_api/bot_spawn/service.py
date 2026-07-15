@@ -137,6 +137,7 @@ async def request_bot(
     recording_enabled: bool = False,
     transcribe_enabled: bool = True,
     continue_meeting: bool = False,
+    authenticated: bool = False,
     max_concurrent: Optional[int] = None,
     redis_url: Optional[str] = None,
     meeting_api_url: Optional[str] = None,
@@ -272,6 +273,36 @@ async def request_bot(
     token = mint_meeting_token(
         meeting_id, user_id, platform, native_meeting_id, secret=token_secret, ttl_seconds=token_ttl_seconds
     )
+    # CDP attach (authenticated bots): borrow the user's long-lived session browser — the one
+    # browser-session.sh keeps alive (logged into Google once over VNC) — instead of launching a
+    # fresh profile. The sidecar container is named by convention and joins the same stack docker
+    # network as the bot, so it is reachable by docker DNS; no DB lookup / no port publishing. If
+    # no session is running, connectOverCDP fails and the meeting ends cleanly (bot terminal-fails).
+    cdp_url: Optional[str] = None
+    if authenticated:
+        # Port 9223, not 9222: Chrome binds :9222 to loopback only, so browser-session runs a socat
+        # relay on :9223 (0.0.0.0) that forwards to Chrome's 127.0.0.1:9222 (see bot/src/session.ts).
+        # Resolve the container NAME to its IP: Chrome's DevTools /json endpoints reject any Host
+        # header that is not an IP or 'localhost' (HTTP 500), so the bot must attach via the IP, not
+        # the docker DNS name. gethostbyname works here because meeting-api shares the stack network
+        # with the browser-session container.
+        import socket as _socket
+        prefix = os.getenv("BROWSER_SESSION_NAME_PREFIX", "vexa-browser-session-")
+        cdp_port = os.getenv("BROWSER_SESSION_CDP_PORT", "9223")
+        host = f"{prefix}{user_id}"
+        try:
+            host = _socket.gethostbyname(host)
+        except Exception as e:
+            log_event(
+                "auth_bot_cdp_resolve_failed", audience="system", level="warning",
+                span="bots.create", user_id=user_id, fields={"host": host, "error": str(e)},
+            )
+        cdp_url = f"http://{host}:{cdp_port}"
+        log_event(
+            "auth_bot_cdp_attach", audience="system", span="bots.create",
+            user_id=user_id, fields={"cdp_url": cdp_url},
+        )
+
     invocation = build_invocation(
         meeting_id=meeting_id,
         platform=platform,
@@ -296,6 +327,8 @@ async def request_bot(
         # A human-in-the-loop dashboard join needs a forgiving lobby window so a late admit does not
         # fail the meeting; everyoneLeftTimeout matches the O6 config.
         automatic_leave={"waitingRoomTimeout": 600000, "everyoneLeftTimeout": 900000},
+        cdp_url=cdp_url,
+        authenticated=authenticated,
     )
 
     # 5. Spawn over runtime.v1.

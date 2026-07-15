@@ -65,6 +65,11 @@ export function createBrowserJoinDriver(page: Page, inv: Invocation): JoinDriver
           botName: inv.botName,
           passcode: inv.passcode,                      // zoom passcode screen / jitsi room password
           authenticated: inv.authenticated,            // join as a signed-in user (persistent context)
+          // CDP attach: the browser lives in the SESSION container, on its own X display. Humanized
+          // (xdotool/XTEST) input only reaches THIS container's display — an empty screen — so it must
+          // be forced to synthetic (CDP-level) input, which is the only kind that crosses to the remote
+          // browser. Without this, a gmeet join defaults to humanized and silently clicks nothing.
+          uiInteractionMode: inv.cdpUrl ? 'synthetic' : undefined,
           waitingRoomTimeoutMs: inv.automaticLeave?.waitingRoomTimeout,
           hooks: { onState: (s: JoinState) => { const bs = mapState(s); if (bs) void report(bs); } },
         });
