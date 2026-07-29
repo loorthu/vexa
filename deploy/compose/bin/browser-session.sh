@@ -17,6 +17,8 @@
 #   deploy/compose/bin/browser-session.sh stop       Stop + remove the container (keeps the login volume).
 #   deploy/compose/bin/browser-session.sh reset       Stop, DELETE the login volume, start fresh (re-login).
 #   deploy/compose/bin/browser-session.sh logs         Follow the container logs.
+#   deploy/compose/bin/browser-session.sh login-status  Probe whether the session is still signed in
+#                                                        (prints logged_in|logged_out|error; exit 0|1|2).
 #
 # Which user? The container is per-user so its name matches the API key that will request bots.
 #   USER_ID=<n>                explicit user id (skips lookup), OR
@@ -41,7 +43,7 @@ ADMIN_API="${ADMIN_API_URL:-http://127.0.0.1:18057}"
 command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found / not accessible (try sudo)." >&2; exit 1; }
 
 # Help before anything that needs Docker or the stack.
-case "${1:-up}" in -h|--help|help) sed -n '10,27p' "$0"; exit 0 ;; esac
+case "${1:-up}" in -h|--help|help) sed -n '10,30p' "$0"; exit 0 ;; esac
 
 # Resolve the user id: explicit USER_ID wins; else look it up from EMAIL via admin-api (same call
 # provision-token uses). We need the id, not the email, because the container name IS the id.
@@ -133,6 +135,12 @@ case "${1:-up}" in
     _exists || { echo "No container ${NAME}." >&2; exit 1; }
     exec docker logs -f "$NAME"
     ;;
+  login-status)
+    _running || { echo "error"; echo "Session ${NAME} is not running (start it: $0 up)." >&2; exit 2; }
+    # Delegate the CDP probe to login-watch.py, scoped to this session's container + platform.
+    exec env BROWSER_SESSION_CONTAINER="$NAME" SESSION_PLATFORM="$PLATFORM" \
+      python3 "$SCRIPT_DIR/login-watch.py" --check
+    ;;
   *)
-    echo "Unknown command '${1}'. Try: up | status | stop | reset | logs | help" >&2; exit 1 ;;
+    echo "Unknown command '${1}'. Try: up | status | stop | reset | logs | login-status | help" >&2; exit 1 ;;
 esac
