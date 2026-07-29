@@ -28,3 +28,11 @@ docs/views/*
 
 # transcription service downloaded model weights (runtime cache)
 deploy/transcription/models/
+
+# local-only runtime cruft at the repo root (never committed):
+#   hub/     HuggingFace model cache (root-owned, bind-mounted by a transcription container)
+#   services/ old pre-restructure services tree — dead cruft; live code is core/meetings/services
+#   .last-tag build artifact written by `make` (deploy/compose)
+/hub/
+/services/
+/deploy/compose/.last-tag
