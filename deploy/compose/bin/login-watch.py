@@ -62,7 +62,6 @@ PLATFORM = os.getenv("SESSION_PLATFORM", "google").lower()
 CONTAINER = os.getenv("BROWSER_SESSION_CONTAINER") or \
     f"vexa-browser-session-{os.getenv('USER_ID', '1')}"
 CDP = os.getenv("BROWSER_SESSION_CDP", "http://127.0.0.1:9222")  # inside the container
-NOVNC_HINT = os.getenv("WATCH_NOVNC_URL", "the browser-session noVNC page (browser-session.sh status)")
 
 STATE_DIR = os.getenv(
     "WATCH_STATE_DIR",
@@ -175,18 +174,40 @@ def write_state(state):
 
 
 # --- notification backends ---------------------------------------------------
+def _novnc_hint():
+    """Where to tell the human to go log in. WATCH_NOVNC_URL overrides; otherwise
+    resolve the container's *published host port* for noVNC (6080/tcp) at send time —
+    browser-session.sh lets Docker auto-assign it, so it's neither 6080 nor stable
+    across container recreation. Fall back to a `status`-command hint if unresolved."""
+    override = os.getenv("WATCH_NOVNC_URL")
+    if override:
+        return override
+    try:
+        fmt = ('{{range $p,$c := .NetworkSettings.Ports}}{{if eq $p "6080/tcp"}}'
+               '{{if $c}}{{(index $c 0).HostPort}}{{end}}{{end}}{{end}}')
+        out = subprocess.run(["docker", "inspect", "-f", fmt, CONTAINER],
+                             capture_output=True, text=True, timeout=10)
+        port = out.stdout.strip()
+        if port:
+            return f"http://localhost:{port}/vnc.html"
+    except Exception:
+        pass
+    return "the browser-session noVNC page (run: browser-session.sh status)"
+
+
 def _message():
     when = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    novnc = _novnc_hint()
     subject = f"[vexa] {PLATFORM} session expired on {CONTAINER} — re-login needed"
     body_html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;font-size:14px;color:#222;">
 <p>The authenticated <strong>{PLATFORM}</strong> session in <code>{CONTAINER}</code> has
 <strong>expired</strong> (detected {when}).</p>
 <p>Meeting bots that attach to this session can't join as the signed-in user until someone logs in again.</p>
-<p><strong>To fix:</strong> open {NOVNC_HINT} and sign back into {PLATFORM} in the visible browser window.</p>
+<p><strong>To fix:</strong> open {novnc} and sign back into {PLATFORM} in the visible browser window.</p>
 <p style="color:#888;font-size:12px;">This is a one-time alert; the next one comes only after the next expiry.</p>
 </body></html>"""
     body_text = (f"The authenticated {PLATFORM} session in {CONTAINER} has expired "
-                 f"(detected {when}). Log back into {PLATFORM} via {NOVNC_HINT}.")
+                 f"(detected {when}). Log back into {PLATFORM} via {novnc}.")
     return subject, body_html, body_text
 
 
