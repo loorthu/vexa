@@ -36,7 +36,7 @@ import {
   type BrowserContext,
 } from '@vexa/remote-browser';
 import { getJoinBrowserArgs } from '@vexa/join';
-import type { RecordingMasterFormat } from '@vexa/recording';
+import { VideoRecordingService, type RecordingMasterFormat } from '@vexa/recording';
 import { isMixedLanePlatform, type Invocation } from './config.js';
 import type { BotPipeline } from './pipeline.js';
 import type { BotRecordingSink } from './recording.js';
@@ -414,6 +414,57 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
       const w = (globalThis as any) as Record<string, any>;
       try { await w.__vexaRecordingTap?.stop?.(); } catch { /* best-effort */ }
     }).catch(() => { /* page already gone */ });
+  };
+}
+
+/**
+ * Start the CDP screencast video recorder → ffmpeg → an h264 fragmented mp4.  // L4 (O6/VM).
+ *
+ * WHY SCREENCAST AND NOT x11grab: when `inv.cdpUrl` is set the bot does not launch a browser at
+ * all — it attaches over CDP to the long-lived session container, so the page renders on THAT
+ * container's display and our own :99 is an empty fluxbox desktop. This branch already learned
+ * that lesson for input (join-driver.ts forces synthetic/CDP input for exactly this reason);
+ * `ffmpeg -f x11grab -i :99` here would faithfully record a blank screen. Screencast rides the
+ * CDP session for THIS page, so it works on both the guest and attached paths, and it is per-tab
+ * — a shared session browser's other tabs and the human's own browsing never bleed in.
+ *
+ * Frames are irregular (screencast fires on visual CHANGE), so VideoRecordingService's FramePacer
+ * converts them to a constant rate; see its docstring for why video time must equal wall time.
+ */
+export async function startVideoRecording(page: Page, inv: Invocation): Promise<() => Promise<void>> {
+  const svc = new VideoRecordingService(inv.meeting_id ?? 0, inv.connectionId ?? 'session');
+  svc.start();
+
+  const cdp = await page.context().newCDPSession(page);
+
+  // A fully backgrounded target can have its screencast throttled to nothing. This only helps
+  // if nobody steals focus afterwards — the pacer degrades that to a frozen frame rather than a
+  // broken timeline, but the recording would show a stale image.
+  await page.bringToFront().catch(() => { /* best-effort */ });
+
+  cdp.on('Page.screencastFrame', (frame: { data: string; sessionId: number }) => {
+    // Ack FIRST and unconditionally: Chromium sends no further frames until the previous one is
+    // acked, so a missed ack silently ends the recording after frame 1. Acking ahead of the push
+    // also means ffmpeg backpressure can never stall the browser — the pacer absorbs it instead.
+    void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => { /* page closing */ });
+    svc.pushFrame(Buffer.from(frame.data, 'base64'));
+  });
+
+  await cdp.send('Page.startScreencast', {
+    format: 'jpeg',
+    quality: Number(process.env.VEXA_VIDEO_JPEG_QUALITY) || 60,
+    // Caps bandwidth and CPU, and sidesteps the null viewport an attached context reports
+    // (setViewportSize is a no-op over connectOverCDP). Aspect ratio is preserved.
+    maxWidth: Number(process.env.VEXA_VIDEO_MAX_WIDTH) || 1280,
+    maxHeight: Number(process.env.VEXA_VIDEO_MAX_HEIGHT) || 720,
+    everyNthFrame: 1,
+  });
+
+  return async () => {
+    await cdp.send('Page.stopScreencast').catch(() => { /* page already gone */ });
+    await cdp.detach().catch(() => { /* session already closed */ });
+    const filePath = await svc.stop();
+    console.log(`[bot] video recording finalized: ${filePath} (${svc.getFramesWritten()} frames)`);
   };
 }
 

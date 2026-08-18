@@ -100,14 +100,20 @@ RUN cd /build && node core/meetings/services/bot/warm-hf-cache.mjs
 FROM vexa/meet-join-env:dev AS runtime
 
 # The bot's OWN runtime deps NOT in the meet-join env: PulseAudio (the speak/TTS
-# + capture audio chain) and fluxbox (a WM for the X11 session). The Playwright +
-# humanized-X11 stack (xvfb·xdotool·xclip·x11vnc·websockify) comes from the base.
+# + capture audio chain), fluxbox (a WM for the X11 session) and ffmpeg (the video
+# recorder encodes CDP screencast frames to h264). The Playwright + humanized-X11
+# stack (xvfb·xdotool·xclip·x11vnc·websockify) comes from the base.
+#
+# ffmpeg must be the distro build, not Playwright's bundled /ms-playwright/ffmpeg-*:
+# that one is a minimal build for recordVideo with no libx264, so the video recorder
+# would spawn it and fail. deploy/lite installs the same package for the same reason.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
        pulseaudio \
        fluxbox \
        socat \
+       ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \

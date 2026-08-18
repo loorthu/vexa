@@ -88,6 +88,66 @@ async function main(): Promise<void> {
     check('recording throw: engine STILL started', engine.starts === 1);
   }
 
+  // 3b) video-start throws (no ffmpeg, CDP refused) → start() RESOLVES and the meeting degrades to
+  //     audio-only. A missing recording is a lost artifact; a rejected start() is a lost meeting.
+  {
+    const faults: LiveStage[] = [];
+    const capSpy: Spy = { started: 0, stopped: 0 };
+    const recSpy: Spy = { started: 0, stopped: 0 };
+    const engine = fakeEngine();
+    let resolved = false;
+    const live = createLivePipeline({
+      startCapture: okThunk(capSpy),
+      startVideo: throwThunk(new Error('spawn ffmpeg ENOENT')),
+      startRecording: okThunk(recSpy),
+      engine,
+      onFault: (s) => faults.push(s),
+      retry: { attempts: 1, delayMs: 0 },
+    });
+    await live.start().then(() => { resolved = true; });
+    check('video throw: start() RESOLVED', resolved);
+    check('video throw: onFault(video-start) fired', faults.includes('video-start'));
+    check('video throw: audio recording STILL started (degrades to audio-only)', recSpy.started === 1);
+    check('video throw: engine STILL started', engine.starts === 1);
+  }
+
+  // 3c) ORDERING — the two recorders are sequenced, not merely both present.
+  //     Video must attach FIRST: audio/video alignment is corrected by delaying audio, which only
+  //     works when audio started later. And video must tear down LAST, after the audio recorder has
+  //     flushed its final chunk, since finalizing reads that audio.
+  {
+    const order: string[] = [];
+    const seq = (name: string) => async (): Promise<() => Promise<void>> => {
+      order.push(`start:${name}`);
+      return async () => { order.push(`stop:${name}`); };
+    };
+    const live = createLivePipeline({
+      startCapture: seq('capture'), startVideo: seq('video'), startRecording: seq('recording'),
+      engine: fakeEngine(), onFault: () => {},
+    });
+    await live.start();
+    await live.stop();
+    check('order: video attaches BEFORE the audio recorder',
+      order.indexOf('start:video') < order.indexOf('start:recording'), order.join(' '));
+    check('order: video tears down AFTER the audio recorder flushed',
+      order.indexOf('stop:video') > order.indexOf('stop:recording'), order.join(' '));
+  }
+
+  // 3d) no startVideo (recording disabled, or captureModes without "video") → nothing changes.
+  {
+    const faults: LiveStage[] = [];
+    const recSpy: Spy = { started: 0, stopped: 0 };
+    const engine = fakeEngine();
+    const live = createLivePipeline({
+      startCapture: okThunk({ started: 0, stopped: 0 }), startRecording: okThunk(recSpy), engine,
+      onFault: (s) => faults.push(s),
+    });
+    await live.start();
+    await live.stop();
+    check('video off: no faults', faults.length === 0, faults.join(','));
+    check('video off: audio recording unaffected', recSpy.started === 1 && recSpy.stopped === 1);
+  }
+
   // 4) happy path → no faults; stop() tears down capture + recording + engine.
   {
     const faults: LiveStage[] = [];

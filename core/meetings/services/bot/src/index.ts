@@ -31,7 +31,7 @@ import { createRedisActsSource, redisActsClientFrom } from './adapters/acts-redi
 import { createBrowserJoinDriver } from './join-driver.js';
 import { createBotPipeline, createLivePipeline, serr, type BotPipeline } from './pipeline.js';
 import { createBotRecordingSink } from './recording.js';
-import { launchBrowser, startCaptureBridge, startRecording, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
+import { launchBrowser, startCaptureBridge, startRecording, startVideoRecording, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
 import { installSignalHandlers } from './signals.js';
 import type {
   JoinDriver,
@@ -204,8 +204,13 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // page-side capture + recording attach + the engine start so pipeline.start() ALWAYS RESOLVES;
     // each failure surfaces LOUD via onFault (console with a full-fidelity serr(e)) instead of
     // throwing into the orchestrator's leave-on-fail backstop (which would hang the bot up).
+    // meeting-api already sends captureModes: ["audio","video"] whenever recording is enabled
+    // (bot_spawn/service.py) — the bot has simply never read it. Reading it here is the whole
+    // feature flag: no invocation.v1 change, no reseal.
+    const videoCaptureEnabled = !!inv.recordingEnabled && (inv.captureModes ?? ['audio']).includes('video');
     pipeline = createLivePipeline({
       startCapture: () => startCaptureBridge(sess.page, inv, bp, undefined, publishChat),   // on the live meeting page
+      startVideo: videoCaptureEnabled ? () => startVideoRecording(sess.page, inv) : undefined, // CDP screencast → h264 fMP4
       startRecording: rec ? () => startRecording(sess.page, inv, rec) : undefined,          // MediaRecorder → recording.v1
       engine: bp,
       onFault: (stage, e) => {

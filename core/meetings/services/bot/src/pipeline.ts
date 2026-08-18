@@ -218,7 +218,7 @@ export function createBotPipeline(
 }
 
 /** The post-admission subsystem stages createLivePipeline sequences (used in fault labels). */
-export type LiveStage = 'capture-start' | 'recording-start' | 'engine-start';
+export type LiveStage = 'capture-start' | 'video-start' | 'recording-start' | 'engine-start';
 
 /**
  * Serialize a thrown value for a LOG LINE (#593 A1). Prefer the stack (names the throwing frame),
@@ -236,6 +236,10 @@ export function serr(e: unknown): string {
 export interface LivePipelineDeps {
   /** Attach the page-side capture; returns its teardown. Best-effort — a throw DEGRADES, never evicts. */
   startCapture: () => Promise<() => Promise<void>>;
+  /** Attach the CDP screencast video recorder (optional); returns its teardown. Best-effort.
+   *  Sequenced BEFORE startRecording so the video timeline never starts after the audio one —
+   *  a negative audio delay cannot be corrected by padding, only by re-cutting the video. */
+  startVideo?: () => Promise<() => Promise<void>>;
   /** Attach the page-side recording (optional); returns its teardown. Best-effort. */
   startRecording?: () => Promise<() => Promise<void>>;
   /** The transcription engine (the BotPipeline). Its start() failure is non-fatal + retried. */
@@ -263,11 +267,12 @@ export interface LivePipelineDeps {
  * thunks to the live page.
  */
 export function createLivePipeline(deps: LivePipelineDeps): Pipeline {
-  const { startCapture, startRecording, engine, onFault } = deps;
+  const { startCapture, startVideo, startRecording, engine, onFault } = deps;
   const maxAttempts = Math.max(1, deps.retry?.attempts ?? 3);
   const delayMs = Math.max(0, deps.retry?.delayMs ?? 2000);
 
   let stopCapture: (() => Promise<void>) | null = null;
+  let stopVideo: (() => Promise<void>) | null = null;
   let stopRecording: (() => Promise<void>) | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
@@ -290,6 +295,12 @@ export function createLivePipeline(deps: LivePipelineDeps): Pipeline {
       // capture-start — best-effort (a page media Event / exposeFunction reject must not evict).
       try { stopCapture = await startCapture(); }
       catch (e) { onFault('capture-start', e); }
+      // video-start — best-effort, and FIRST of the two recorders (see startVideo).
+      // A screencast/ffmpeg failure must degrade to an audio-only meeting, never evict.
+      if (startVideo) {
+        try { stopVideo = await startVideo(); }
+        catch (e) { onFault('video-start', e); }
+      }
       // recording-start — best-effort.
       if (startRecording) {
         try { stopRecording = await startRecording(); }
@@ -306,6 +317,10 @@ export function createLivePipeline(deps: LivePipelineDeps): Pipeline {
       if (sc) await sc().catch(() => { /* best-effort — page may be closing */ });
       const sr = stopRecording; stopRecording = null;
       if (sr) await sr().catch(() => { /* best-effort — flush the final chunk → master assembly */ });
+      // Video teardown runs LAST: it finalizes (and, on the local-file path, muxes) against the
+      // audio the recording teardown just flushed, so it must not race ahead of that flush.
+      const sv = stopVideo; stopVideo = null;
+      if (sv) await sv().catch(() => { /* best-effort — a lost video must not fail the meeting */ });
       await engine.stop().catch(() => { /* best-effort; idempotent across double-stop */ });
     },
   };
