@@ -162,11 +162,33 @@ async def finalize_master(
     media_format = mf.get("format", "wav")
     master_key = master_storage_key(mf["storage_path"], media_format)
 
-    if not await storage.exists(master_key):
-        # Gather the chunk objects under the recording's prefix (excluding any prior master).
-        prefix = mf["storage_path"].rsplit("/", 1)[0]
-        keys = [k for k in await storage.list(prefix) if not k.rsplit("/", 1)[-1].startswith("master.")]
-        chunks = [await storage.get(k) for k in sorted(keys)]
+    # Gather the chunk objects under the recording's prefix (excluding any prior master). This is
+    # read every time so staleness can be detected; the prefix is still correct once storage_path
+    # has become the master key, since both live in the same directory.
+    prefix = mf["storage_path"].rsplit("/", 1)[0]
+    keys = sorted(
+        k for k in await storage.list(prefix) if not k.rsplit("/", 1)[-1].startswith("master.")
+    )
+
+    # REBUILD when parts have arrived since the master was built.
+    #
+    # This used to be `if not exists(master_key)`, so the first finalize won permanently. Reading
+    # /master (or /raw) DURING a recording therefore froze the master at whatever existed in that
+    # instant — and because finalizing also sets is_final and repoints storage_path at master.*,
+    # every later finalize was suppressed and the truncation became permanent. A single mid-meeting
+    # peek silently cost the rest of the recording: observed as a 1.0 MB master for a recording
+    # whose own metadata said 8.3 MB across 66 parts.
+    if not keys:
+        # Nothing to build FROM — the parts are gone (swept after archiving) or none were ever
+        # uploaded. Serve whatever master exists; the codec rejects an empty chunk list, and
+        # rebuilding is meaningless with no parts. Reachable now that /raw finalizes on every
+        # read rather than only when storage_path was not already a master.
+        return master_key if await storage.exists(master_key) else None
+
+    built_from = mf.get("finalized_chunk_count")
+    is_stale = built_from is None or built_from != len(keys)
+    if is_stale or not await storage.exists(master_key):
+        chunks = [await storage.get(k) for k in keys]
         master_bytes = build_recording_master(chunks, media_format)
         await storage.upload(master_key, master_bytes, content_type=_content_type(media_format))
 
@@ -184,6 +206,9 @@ async def finalize_master(
         m["is_final"] = True
         m["finalized_at"] = _now_iso()
         m["finalized_by"] = "recording_finalizer.master"
+        # How many parts this master covers. The staleness check above compares against it, so a
+        # master built mid-recording is rebuilt once more parts land instead of being served forever.
+        m["finalized_chunk_count"] = len(keys)
         existing_pb = r.get("playback_url") or {}
         r["playback_url"] = {
             "audio": existing_pb.get("audio")

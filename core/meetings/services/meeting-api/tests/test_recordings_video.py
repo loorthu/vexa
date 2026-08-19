@@ -223,3 +223,61 @@ async def test_concurrent_first_chunks_land_under_one_recording():
                                 recording_id=rec["id"], media_type="video")
     master = await storage.get(key)
     assert master.startswith(video0[:12]), "master does not begin with ftyp — init segment lost"
+
+
+@pytest.mark.asyncio
+async def test_master_read_mid_recording_does_not_truncate_the_final_master():
+    """FIELD BUG: one mid-meeting peek at the master cost the rest of the recording.
+
+    finalize_master built the master only `if not exists(master_key)`, so the FIRST finalize won
+    permanently. Finalizing also sets is_final and repoints storage_path at master.*, which
+    suppressed every later finalize. So reading /master (or /raw) while the bot was still uploading
+    froze the master at whatever existed in that instant — for ever. Observed live: a 1.0 MB master
+    for a recording whose own metadata reported 8.3 MB across 66 parts.
+
+    RED before the fix (master stays at the first 3 parts), GREEN after.
+    """
+    repo, storage = _seeded()
+    early = [_part(k, 32) for k in range(3)]
+    for seq, p in enumerate(early):
+        await _upload(repo, storage, seq=seq, is_final=False, data=p)
+
+    rec = (await repo.list_meeting_recordings(USER))[0]
+
+    # A consumer peeks at the master while the bot is still uploading (exactly what reading
+    # media_file_id off /master does).
+    key = await finalize_master(repo, storage, meeting_id=MEETING_ID,
+                                recording_id=rec["id"], media_type="video")
+    assert await storage.get(key) == b"".join(early), "the early master should cover what exists so far"
+
+    # The meeting continues.
+    later = [_part(0x40 + k, 32) for k in range(5)]
+    for i, p in enumerate(later):
+        await _upload(repo, storage, seq=3 + i, is_final=False, data=p)
+    await _upload(repo, storage, seq=8, is_final=True, data=b"")
+
+    key = await finalize_master(repo, storage, meeting_id=MEETING_ID,
+                                recording_id=rec["id"], media_type="video")
+    assert await storage.get(key) == b"".join(early + later), \
+        "the master must cover the WHOLE recording, not just what existed at the first peek"
+
+
+@pytest.mark.asyncio
+async def test_settled_recording_is_not_rebuilt_on_every_read():
+    """The staleness check must be a count comparison, not 'always rebuild'."""
+    repo, storage = _seeded()
+    for seq in range(3):
+        await _upload(repo, storage, seq=seq, is_final=False, data=_part(seq, 32))
+    await _upload(repo, storage, seq=3, is_final=True, data=b"")
+    rec = (await repo.list_meeting_recordings(USER))[0]
+
+    await finalize_master(repo, storage, meeting_id=MEETING_ID, recording_id=rec["id"], media_type="video")
+    rec = (await repo.list_meeting_recordings(USER))[0]
+    mf = next(m for m in rec["media_files"] if m["type"] == "video")
+    stamped = mf.get("finalized_chunk_count")
+    assert stamped is not None, "the finalizer must record how many parts the master covers"
+
+    key = await finalize_master(repo, storage, meeting_id=MEETING_ID, recording_id=rec["id"], media_type="video")
+    rec2 = (await repo.list_meeting_recordings(USER))[0]
+    mf2 = next(m for m in rec2["media_files"] if m["type"] == "video")
+    assert mf2.get("finalized_chunk_count") == stamped, "a settled recording must not keep rebuilding"

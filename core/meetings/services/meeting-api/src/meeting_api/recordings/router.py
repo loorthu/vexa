@@ -270,18 +270,20 @@ def build_router(
         # signal chunk (0 bytes served) or, with the jsonb fix, the LAST data part (#412: last-part-
         # only). is_final must stop doubling as "playable" — the ONLY playable object is master.<fmt>,
         # so finalize (idempotent) unless storage_path already IS the master key, then re-read.
-        storage_path = mf.get("storage_path") or ""
-        if not storage_path.rsplit("/", 1)[-1].startswith("master."):
-            await finalize_master(
-                repo, storage, meeting_id=rec["meeting_id"], recording_id=recording_id,
-                media_type=mf.get("type", type),
-            )
-            recs = await repo.list_meeting_recordings(user_id)
-            rec = next((r for r in recs if r.get("id") == recording_id), rec)
-            mf = next(
-                (m for m in (rec or {}).get("media_files", []) if str(m.get("id")) == str(media_file_id)),
-                mf,
-            )
+        # Finalize UNCONDITIONALLY. The old guard skipped this whenever storage_path already named
+        # a master, which meant a master built mid-recording was served for ever — the very case
+        # where it is guaranteed to be incomplete. finalize_master is now self-limiting: it rebuilds
+        # only when the part count has moved, so a settled recording costs one storage list.
+        await finalize_master(
+            repo, storage, meeting_id=rec["meeting_id"], recording_id=recording_id,
+            media_type=mf.get("type", type),
+        )
+        recs = await repo.list_meeting_recordings(user_id)
+        rec = next((r for r in recs if r.get("id") == recording_id), rec)
+        mf = next(
+            (m for m in (rec or {}).get("media_files", []) if str(m.get("id")) == str(media_file_id)),
+            mf,
+        )
         storage_path = mf.get("storage_path")
         if not storage_path:
             raise HTTPException(status_code=404, detail="Media file has no storage path")
