@@ -18,8 +18,29 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 
+from .jsonb import chunk_storage_key
 from .ports import RecordingRepo, Storage
-from .service import SessionNotFound, _verify_meeting_token, finalize_master, upload_chunk
+from .service import (
+    SessionNotFound,
+    _verify_meeting_token,
+    delete_recording,
+    finalize_master,
+    upload_chunk,
+)
+
+
+def _content_type_for(media_format: str, media_type: str) -> str:
+    """Container + stream -> content type. Shared so the byte routes cannot disagree: a chunk
+    served as octet-stream while the master says video/mp4 is the kind of mismatch that only
+    shows up as a player refusing to play one of them."""
+    if media_format == "wav":
+        return "audio/wav"
+    if media_format == "webm":
+        return "audio/webm" if media_type == "audio" else "video/webm"
+    if media_format == "mp4":
+        return "video/mp4" if media_type == "video" else "audio/mp4"
+    return "application/octet-stream"
+
 
 
 def _bearer_token(authorization: Optional[str]) -> str:
@@ -243,6 +264,112 @@ def build_router(
             "start_time_utc": (mf or {}).get("start_time_utc"),
         })
 
+    def _resolve_media_file(rec: Optional[dict], media_file_id) -> dict:
+        """The (recording, media_file) lookup every chunk route shares. 404s are deliberately
+        indistinguishable from 'not yours' — list_meeting_recordings is already caller-scoped."""
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        mf = next(
+            (m for m in rec.get("media_files", []) if str(m.get("id")) == str(media_file_id)),
+            None,
+        )
+        if mf is None:
+            raise HTTPException(status_code=404, detail="No such media file")
+        return mf
+
+    @router.delete("/recordings/{recording_id}")
+    async def delete_recording_route(
+        recording_id: int,
+        x_user_id: Optional[str] = Header(default=None),
+    ):
+        """Purge one recording's media and its record, leaving the meeting and its transcript.
+
+        Declared in api.v1 from the start but previously waived to DELETE /meetings/{p}/{n}, which
+        takes the transcript with it. A caller that has durably archived the media elsewhere needs
+        to drop just the media.
+        """
+        user_id = _resolve_user_id(x_user_id)
+        recs = await repo.list_meeting_recordings(user_id)
+        rec = next((r for r in recs if r.get("id") == recording_id), None)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        result = await delete_recording(
+            repo, storage,
+            meeting_id=rec["meeting_id"], recording_id=recording_id,
+            session_uid=rec.get("session_uid") or "", user_id=rec.get("user_id") or user_id,
+        )
+        return JSONResponse(content=result)
+
+    @router.get("/recordings/{recording_id}/media/{media_file_id}/chunks")
+    async def list_recording_chunks(
+        recording_id: int,
+        media_file_id: int,
+        after: int = -1,
+        x_user_id: Optional[str] = Header(default=None),
+    ):
+        """The parts index — what exists, how big, and with what hash, WITHOUT assembling.
+
+        /master and /raw both serve the finalized master, which only answers "is it done yet".
+        A consumer that wants each part as it lands — to mirror a recording across a link while
+        the meeting is still running, verifying as it goes — needs this. ``after`` makes it a
+        cheap poll: pass the highest seq already held and receive only what is new.
+
+        ``complete`` is the recording's own COMPLETED state, so a poller knows when to stop
+        without inferring it from a gap in arrivals.
+        """
+        user_id = _resolve_user_id(x_user_id)
+        recs = await repo.list_meeting_recordings(user_id)
+        rec = next((r for r in recs if r.get("id") == recording_id), None)
+        mf = _resolve_media_file(rec, media_file_id)
+        chunks = [c for c in (mf.get("chunks") or []) if int(c.get("seq", 0)) > after]
+        return JSONResponse(content={
+            "recording_id": recording_id,
+            "media_file_id": mf.get("id"),
+            "media_type": mf.get("type"),
+            "format": mf.get("format"),
+            "start_time_utc": mf.get("start_time_utc"),
+            "duration_seconds": mf.get("duration_seconds"),
+            "complete": rec.get("status") == "completed",
+            "chunks": chunks,
+        })
+
+    @router.get("/recordings/{recording_id}/media/{media_file_id}/chunks/{chunk_seq}")
+    async def get_recording_chunk(
+        recording_id: int,
+        media_file_id: int,
+        chunk_seq: int,
+        x_user_id: Optional[str] = Header(default=None),
+    ):
+        """One part's bytes, verbatim — NOT the assembled master.
+
+        Deliberately does not finalize: finalizing mid-meeting would flip the recording to a
+        state that says "done" while the bot is still uploading. The parts are immutable once
+        written, so this is safe to serve while the recording is in progress.
+        """
+        user_id = _resolve_user_id(x_user_id)
+        recs = await repo.list_meeting_recordings(user_id)
+        rec = next((r for r in recs if r.get("id") == recording_id), None)
+        mf = _resolve_media_file(rec, media_file_id)
+        entry = next((c for c in (mf.get("chunks") or []) if int(c.get("seq", 0)) == chunk_seq), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="No such chunk")
+        key = chunk_storage_key(
+            user_id=rec.get("user_id") or user_id,
+            recording_id=recording_id,
+            session_uid=rec.get("session_uid") or "",
+            media_type=mf.get("type", "audio"),
+            media_format=mf.get("format", "webm"),
+            chunk_seq=chunk_seq,
+        )
+        data = await storage.get(key)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Chunk object missing from storage")
+        return Response(
+            content=data,
+            media_type=_content_type_for(mf.get("format", "webm"), mf.get("type", "audio")),
+            headers={"X-Chunk-Sha256": entry.get("sha256") or "", "X-Chunk-Seq": str(chunk_seq)},
+        )
+
     @router.get("/recordings/{recording_id}/media/{media_file_id}/raw")
     async def get_recording_media_raw(
         recording_id: int,
@@ -288,16 +415,7 @@ def build_router(
         if not storage_path:
             raise HTTPException(status_code=404, detail="Media file has no storage path")
         media_format = mf.get("format", "webm")
-        if media_format == "wav":
-            content_type = "audio/wav"
-        elif media_format == "webm":
-            content_type = "audio/webm" if mf.get("type") == "audio" else "video/webm"
-        elif media_format == "mp4":
-            # The screencast recorder's container. A <video> served
-            # application/octet-stream refuses to play, so this must be explicit.
-            content_type = "video/mp4" if mf.get("type") == "video" else "audio/mp4"
-        else:
-            content_type = "application/octet-stream"
+        content_type = _content_type_for(media_format, mf.get("type", "audio"))
 
         # Honor HTTP Range so the <audio>/<video> element + dashboard proxy can seek without
         # downloading the whole master. Resolve total size cheaply (S3 head) when we can; only fall

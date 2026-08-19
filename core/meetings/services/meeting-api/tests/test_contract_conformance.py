@@ -49,6 +49,8 @@ API_V1_MEETING_SURFACE: set[tuple[str, str]] = {
     ("GET", "/recordings"),
     ("GET", "/recordings/{recording_id}"),
     ("DELETE", "/recordings/{recording_id}"),
+    ("GET", "/recordings/{recording_id}/media/{media_file_id}/chunks"),
+    ("GET", "/recordings/{recording_id}/media/{media_file_id}/chunks/{chunk_seq}"),
     ("GET", "/meetings"),
 }
 
@@ -62,10 +64,6 @@ WAIVED: dict[tuple[str, str], str] = {
         "actually maps GET /meetings/{meeting_id} → meeting-api GET /meetings/{meeting_id}; the "
         "dashboard meeting-detail reads /meetings/{id}. Deferred reconcile (drop or implement) is a "
         "lane:contract change (A1/A2, MATURITY-FINDINGS.md).",
-    ("DELETE", "/recordings/{recording_id}"):
-        "api.v1 declares recording delete; not implemented in the v0.12 carve (no consumer wired "
-        "it — delete rides DELETE /meetings/{p}/{n}, which purges the meeting's recordings). "
-        "Deferred reconcile (A2, MATURITY-FINDINGS.md).",
     ("PUT", "/bots/{platform}/{native_meeting_id}/config"):
         "Voice/config command to an ACTIVE bot (language/task update) — a bot-command-channel path, "
         "not meeting-api persistence. Deferred with the voice-agent carve; the gateway forwards it.",

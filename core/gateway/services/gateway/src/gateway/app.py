@@ -354,6 +354,28 @@ def create_app(
             "GET", _meeting(f"/recordings/{recording_id}/media/{media_file_id}/raw"), request
         )
 
+    # The per-part index + one part's bytes. A consumer mirroring a recording across a link polls
+    # the index (?after=<seq>, preserved by _forward) and pulls each new part as it lands, rather
+    # than waiting on the assembled master.
+    @app.get("/recordings/{recording_id}/media/{media_file_id}/chunks")
+    async def list_recording_chunks(recording_id: int, media_file_id: int, request: Request):
+        return await _forward(
+            "GET", _meeting(f"/recordings/{recording_id}/media/{media_file_id}/chunks"), request
+        )
+
+    @app.get("/recordings/{recording_id}/media/{media_file_id}/chunks/{chunk_seq}")
+    async def get_recording_chunk(recording_id: int, media_file_id: int, chunk_seq: int, request: Request):
+        return await _forward(
+            "GET",
+            _meeting(f"/recordings/{recording_id}/media/{media_file_id}/chunks/{chunk_seq}"),
+            request,
+        )
+
+    # Purge one recording's media + record, leaving the meeting and its transcript intact.
+    @app.delete("/recordings/{recording_id}")
+    async def delete_recording(recording_id: int, request: Request):
+        return await _forward("DELETE", _meeting(f"/recordings/{recording_id}"), request)
+
     @app.get("/meetings")
     async def meetings(request: Request):
         return await _forward("GET", _meeting("/meetings"), request)

@@ -68,6 +68,7 @@ def apply_chunk_to_recording(
     duration_seconds: Optional[float],
     sample_rate: Optional[int],
     start_time_utc: Optional[str] = None,
+    chunk_sha256: Optional[str] = None,
 ) -> tuple[dict, bool]:
     """Fold one uploaded chunk into the recording payload.
 
@@ -107,6 +108,23 @@ def apply_chunk_to_recording(
     # offset in the media needs the latter.
     prior_start_utc = (prior_same_type or {}).get("start_time_utc") if prior_same_type else None
     resolved_start_utc = prior_start_utc or start_time_utc
+
+    # A per-chunk index, so a consumer can pull the parts INDIVIDUALLY and verify each as it
+    # arrives, rather than waiting for the whole master. The aggregate counters above cannot
+    # support that: they say how many chunks exist, never which or how big or with what hash.
+    # Keyed by seq and replaced in place, so a retried upload of the same seq updates rather
+    # than duplicating. The empty COMPLETED signal is bookkeeping, not media — it is not indexed.
+    prior_chunks = list((prior_same_type or {}).get("chunks") or []) if prior_same_type else []
+    if file_size > 0:
+        entry = {
+            "seq": chunk_seq,
+            "size_bytes": file_size,
+            "sha256": chunk_sha256,
+            "uploaded_at": _now_iso(),
+        }
+        prior_chunks = [c for c in prior_chunks if c.get("seq") != chunk_seq] + [entry]
+        prior_chunks.sort(key=lambda c: c.get("seq", 0))
+
     media_files = [mf for mf in prior_media_files if mf.get("type") != media_type]
 
     # Pack U.7 — preserve a finalized master path against a late-chunk overwrite. Matched on the
@@ -141,6 +159,7 @@ def apply_chunk_to_recording(
         "chunk_seq": chunk_seq,
         "first_chunk_at": first_chunk_at,
         "start_time_utc": resolved_start_utc,
+        "chunks": prior_chunks,
         "metadata": {"sample_rate": sample_rate} if sample_rate else {},
         "created_at": _now_iso(),
         "is_final": new_is_final,

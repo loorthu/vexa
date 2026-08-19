@@ -55,6 +55,10 @@ class S3Storage:
         obj = await self._run(self._c().get_object, Bucket=self._bucket, Key=key)
         return await self._run(obj["Body"].read)
 
+    async def delete(self, key: str) -> None:
+        # S3 delete_object is already idempotent — an absent key returns 204, not an error.
+        await self._run(self._c().delete_object, Bucket=self._bucket, Key=key)
+
     async def size(self, key: str) -> int:
         head = await self._run(self._c().head_object, Bucket=self._bucket, Key=key)
         return int(head["ContentLength"])

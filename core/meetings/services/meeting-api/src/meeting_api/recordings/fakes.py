@@ -31,6 +31,10 @@ class InMemoryStorage:
     async def get(self, key: str) -> bytes:
         return self.blobs[key]
 
+    async def delete(self, key: str) -> None:
+        self.blobs.pop(key, None)
+        self.content_types.pop(key, None)
+
     async def size(self, key: str) -> int:
         return len(self.blobs[key])
 

@@ -32,6 +32,11 @@ class Storage(Protocol):
 
     async def get(self, key: str) -> bytes: ...
 
+    async def delete(self, key: str) -> None:
+        """Remove one object. Idempotent — deleting an absent key is not an error, so a partially
+        completed purge can be retried without special-casing what already went."""
+        ...
+
     async def exists(self, key: str) -> bool: ...
 
     async def size(self, key: str) -> int:

@@ -15,6 +15,8 @@ golden-locked — this module only orchestrates the IO + the JSONB bookkeeping a
 """
 from __future__ import annotations
 
+import hashlib
+
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -99,6 +101,10 @@ async def upload_chunk(
         media_type=media_type, media_format=media_format, chunk_seq=chunk_seq,
     )
     await storage.upload(key, data, content_type=_content_type(media_format))
+    # Hash the bytes AS RECEIVED, once. A consumer reassembling the master from parts checks each
+    # against this, so it must be computed here rather than re-derived on read — a hash taken from
+    # storage at read time would agree with a corrupted object.
+    chunk_sha256 = hashlib.sha256(data).hexdigest() if data else None
 
     # G3 — fold the chunk into the JSONB ATOMICALLY: the mutator reads the LIVE recordings under one
     # row lock and folds cumulatively, so a concurrent chunk/finalize can't clobber it (the old
@@ -115,7 +121,7 @@ async def upload_chunk(
             session_uid=session_uid, media_type=media_type, media_format=media_format,
             storage_path=key, file_size=len(data), chunk_seq=chunk_seq, is_final=is_final,
             duration_seconds=duration_seconds, sample_rate=sample_rate,
-            start_time_utc=start_time_utc,
+            start_time_utc=start_time_utc, chunk_sha256=chunk_sha256,
         )
         others = [r for r in recs if r.get("id") != rid]
         return others + [payload], (payload, transitioned_)
@@ -247,3 +253,46 @@ def _verify_meeting_token(token: str, *, secret: Optional[str] = None) -> dict[s
     if exp is not None and int(datetime.now(timezone.utc).timestamp()) > int(exp):
         raise ValueError("MeetingToken expired")
     return claims
+
+
+async def delete_recording(
+    repo: RecordingRepo,
+    storage: Storage,
+    *,
+    meeting_id: int,
+    recording_id: int,
+    session_uid: str,
+    user_id: int,
+) -> dict:
+    """Purge ONE recording: its objects, then its JSONB record.
+
+    api.v1 has always declared DELETE /recordings/{id}; it was waived on the reasoning that deletion
+    "rides DELETE /meetings/{p}/{n}". That purges the whole meeting — transcripts included — so it
+    is not usable by a caller that wants the media gone and the transcript kept. This is the
+    per-recording purge that gap requires.
+
+    Objects go FIRST. If the JSONB row went first and the object sweep then failed, the objects
+    would be orphaned with nothing left pointing at them; the other order leaves a record whose
+    objects are already gone, which a retry resolves. Storage deletes are idempotent, so a partial
+    purge is safe to repeat.
+
+    Returns ``{deleted_objects, recording_id}``.
+    """
+    prefix = f"recordings/{user_id}/{recording_id}/"
+    keys = await storage.list(prefix)
+    for key in keys:
+        await storage.delete(key)
+
+    def _drop(recs):
+        remaining = [r for r in recs if r.get("id") != recording_id]
+        return remaining, None
+
+    await repo.mutate_recordings(meeting_id, _drop)
+    log_event(
+        "recording_deleted",
+        audience="user",
+        span="recordings",
+        user_id=user_id,
+        fields={"recording_id": recording_id, "objects": len(keys), "session_uid": session_uid},
+    )
+    return {"deleted_objects": len(keys), "recording_id": recording_id}
