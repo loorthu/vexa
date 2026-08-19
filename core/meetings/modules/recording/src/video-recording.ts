@@ -26,6 +26,20 @@ export type VideoHwAccel = 'none' | 'vaapi' | 'nvenc';
  */
 export type VideoFrameSource = 'screencast' | 'x11grab';
 
+/**
+ * Receives the encoded byte stream in order, split into recording.v1 chunks.
+ *
+ * Splitting is by BYTE COUNT, not by frame or fragment: concatenating the parts in seq order
+ * reproduces ffmpeg's output exactly, whatever the boundaries. The container is what makes a
+ * PARTIAL concatenation useful — fragmented mp4 keeps the header up front and each fragment
+ * self-describing, so any prefix is playable and a bot that dies mid-meeting still leaves
+ * something watchable.
+ *
+ * The last call is always an EMPTY chunk with isFinal=true — recording.v1's COMPLETED signal,
+ * matching what the audio tap sends.
+ */
+export type VideoChunkSink = (seq: number, isFinal: boolean, bytes: Buffer) => void;
+
 export interface FramePacerDeps {
   /** Target constant frame rate. Video duration is exactly framesWritten / fps. */
   fps: number;
@@ -159,11 +173,26 @@ export class VideoRecordingService {
   private fps: number;
   private pacer: FramePacer | null = null;
   private pacerTimer: NodeJS.Timeout | null = null;
+  private onChunk: VideoChunkSink | null = null;
+  private chunkBytes: number;
+  private chunkMs: number;
+  private chunkTimer: NodeJS.Timeout | null = null;
+  private pending: Buffer[] = [];
+  private pendingLen = 0;
+  private chunkSeq = 0;
+  private finalEmitted = false;
 
   constructor(
     private meetingId: number,
     private sessionUid: string,
+    onChunk?: VideoChunkSink,
   ) {
+    this.onChunk = onChunk ?? null;
+    this.chunkBytes = Number(process.env.VEXA_VIDEO_CHUNK_BYTES) || 4 * 1024 * 1024;
+    // A SIZE threshold alone does not bound how much is at risk: a near-static meeting screen
+    // encodes to very little, so 4 MB can take minutes to accumulate and a crash loses all of it.
+    // Flushing on a clock too bounds the exposure in TIME, matching the audio tap's timeslice.
+    this.chunkMs = Number(process.env.VEXA_VIDEO_CHUNK_MS) || 15_000;
     this.display = process.env.DISPLAY || ':99';
     this.hwaccel = (process.env.VIDEO_HWACCEL || 'none').toLowerCase() as VideoHwAccel;
     this.encodeH264 = process.env.ENCODE_H264 === 'true';
@@ -202,6 +231,14 @@ export class VideoRecordingService {
       this.pacerTimer = setInterval(() => this.pacer?.tick(), Math.max(1, Math.round(1000 / this.fps)));
     }
 
+    // Streaming mode: ffmpeg writes the encoded file to stdout and we cut it into chunks as it
+    // arrives, so every finished part is durable before the meeting ends. Nothing is buffered to
+    // disk, so a SIGKILL loses at most the tail below the chunk threshold.
+    if (this.onChunk) {
+      this.ffmpegProcess.stdout?.on('data', (buf: Buffer) => this.absorb(buf));
+      this.chunkTimer = setInterval(() => this.flushPartial(), this.chunkMs);
+    }
+
     this.ffmpegProcess.stderr?.on('data', (data: Buffer) => {
       // ffmpeg writes progress to stderr; only log errors
       const text = data.toString().trim();
@@ -230,6 +267,55 @@ export class VideoRecordingService {
     this.pacer?.push(jpeg);
   }
 
+  /** Accumulate encoded bytes and emit whole chunks as the threshold is crossed. */
+  private absorb(buf: Buffer): void {
+    this.pending.push(buf);
+    this.pendingLen += buf.length;
+    while (this.pendingLen >= this.chunkBytes) {
+      const joined = Buffer.concat(this.pending, this.pendingLen);
+      const take = joined.subarray(0, this.chunkBytes);
+      const rest = joined.subarray(this.chunkBytes);
+      this.pending = rest.length ? [rest] : [];
+      this.pendingLen = rest.length;
+      this.emit(take, false);
+    }
+  }
+
+  /**
+   * Emit whatever is buffered as a chunk, if anything. Driven by the clock so the amount of
+   * unflushed video stays time-bounded regardless of bitrate. A no-op when nothing is pending —
+   * emitting an empty DATA chunk would waste a seq and upload zero bytes.
+   */
+  private flushPartial(): void {
+    if (this.finalEmitted || this.pendingLen === 0) return;
+    const bytes = Buffer.concat(this.pending, this.pendingLen);
+    this.pending = [];
+    this.pendingLen = 0;
+    this.emit(bytes, false);
+  }
+
+  /** Flush whatever is buffered, then the empty COMPLETED signal — exactly once. */
+  private flushFinal(): void {
+    if (this.finalEmitted) return;
+    if (this.pendingLen > 0) {
+      this.emit(Buffer.concat(this.pending, this.pendingLen), false);
+      this.pending = [];
+      this.pendingLen = 0;
+    }
+    this.finalEmitted = true;
+    this.emit(Buffer.alloc(0), true);
+  }
+
+  private emit(bytes: Buffer, isFinal: boolean): void {
+    const seq = this.chunkSeq++;
+    try {
+      this.onChunk?.(seq, isFinal, bytes);
+    } catch (err: any) {
+      // A sink failure must never propagate into ffmpeg's data handler.
+      log(`[VideoRecording] chunk ${seq} sink threw: ${err?.message ?? String(err)}`);
+    }
+  }
+
   /**
    * Stop recording and return the path to the finished file.
    *
@@ -242,9 +328,14 @@ export class VideoRecordingService {
       clearInterval(this.pacerTimer);
       this.pacerTimer = null;
     }
+    if (this.chunkTimer) {
+      clearInterval(this.chunkTimer);
+      this.chunkTimer = null;
+    }
     this.pacer?.stop();
 
     if (!this.ffmpegProcess || !this.isRunning) {
+      this.flushFinal();
       return Promise.resolve(this.filePath);
     }
 
@@ -252,7 +343,11 @@ export class VideoRecordingService {
       const onExit = () => {
         clearTimeout(termTimer);
         clearTimeout(forceKillTimer);
-        log(`[VideoRecording] ffmpeg stopped gracefully (${this.pacer?.framesWritten ?? 0} frames)`);
+        // Flush AFTER exit: ffmpeg writes the trailing fragment as it finalizes, and stdout's
+        // last 'data' lands before 'exit'. Flushing earlier would cut off the tail and, worse,
+        // send the COMPLETED signal before the final bytes.
+        this.flushFinal();
+        log(`[VideoRecording] ffmpeg stopped gracefully (${this.pacer?.framesWritten ?? 0} frames, ${this.chunkSeq} chunks)`);
         resolve(this.filePath);
       };
 
@@ -279,6 +374,11 @@ export class VideoRecordingService {
   }
 
   /** Frames handed to ffmpeg so far. Screencast only; 0 for x11grab. */
+  /** recording.v1 chunks emitted so far, including the trailing COMPLETED signal. */
+  getChunksEmitted(): number {
+    return this.chunkSeq;
+  }
+
   getFramesWritten(): number {
     return this.pacer?.framesWritten ?? 0;
   }
@@ -563,7 +663,10 @@ export class VideoRecordingService {
       '-g', String(this.fps * 2),
       '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
       '-an',
-      this.filePath,
+      // Streaming mode needs an explicit muxer: with pipe:1 ffmpeg cannot infer one from a
+      // filename extension. Without a chunk sink we keep writing a plain file, which is what
+      // the guest/local path and the smoke test use.
+      ...(this.onChunk ? ['-f', 'mp4', 'pipe:1'] : [this.filePath]),
     ];
   }
 }

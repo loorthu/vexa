@@ -24,7 +24,10 @@ from .jsonb import apply_chunk_to_recording, chunk_storage_key, master_storage_k
 from .ports import RecordingRepo, Storage
 
 # Media content types (parent ``recording_codec._media_content_type``, reduced to the core set).
-_CONTENT_TYPES = {"webm": "video/webm", "wav": "audio/wav"}
+# Container -> content type. mp4 is the screencast video recorder's container (h264 in
+# fragmented mp4); without it the byte route would serve application/octet-stream and a
+# <video> element would refuse to play the master.
+_CONTENT_TYPES = {"webm": "video/webm", "wav": "audio/wav", "mp4": "video/mp4"}
 
 
 def _content_type(media_format: str) -> str:
@@ -52,6 +55,7 @@ async def upload_chunk(
     is_final: bool = True,
     duration_seconds: Optional[float] = None,
     sample_rate: Optional[int] = None,
+    start_time_utc: Optional[str] = None,
 ) -> dict:
     """Process ONE recording chunk upload. ``token_meeting_id`` is the verified MeetingToken's
     meeting_id (the route verifies the token before calling this).
@@ -103,6 +107,7 @@ async def upload_chunk(
             session_uid=session_uid, media_type=media_type, media_format=media_format,
             storage_path=key, file_size=len(data), chunk_seq=chunk_seq, is_final=is_final,
             duration_seconds=duration_seconds, sample_rate=sample_rate,
+            start_time_utc=start_time_utc,
         )
         others = [r for r in recs if r.get("id") != rid]
         return others + [payload], (payload, transitioned_)

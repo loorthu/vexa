@@ -42,6 +42,7 @@ def apply_chunk_to_recording(
     is_final: bool,
     duration_seconds: Optional[float],
     sample_rate: Optional[int],
+    start_time_utc: Optional[str] = None,
 ) -> tuple[dict, bool]:
     """Fold one uploaded chunk into the recording payload.
 
@@ -75,14 +76,21 @@ def apply_chunk_to_recording(
     cumulative_bytes = (prior_bytes + file_size) if prior_same_type else file_size
     cumulative_chunk_count = (prior_chunk_count + 1) if prior_same_type else 1
     first_chunk_at = prior_first_chunk_at or _now_iso()
+    # The RECORDER's clock at its first frame, first-write-wins like first_chunk_at. Distinct from
+    # it on purpose: first_chunk_at is when the server saw the chunk, so it carries encode + upload
+    # latency, while this is when the media actually starts. Aligning a transcript moment to an
+    # offset in the media needs the latter.
+    prior_start_utc = (prior_same_type or {}).get("start_time_utc") if prior_same_type else None
+    resolved_start_utc = prior_start_utc or start_time_utc
     media_files = [mf for mf in prior_media_files if mf.get("type") != media_type]
 
-    # Pack U.7 — preserve a finalized master path against a late-chunk overwrite.
+    # Pack U.7 — preserve a finalized master path against a late-chunk overwrite. Matched on the
+    # "master." basename rather than the two audio spellings, so a video master (master.mp4) is
+    # protected by the same guard instead of being clobbered by a late chunk.
     prior_sp = (prior_same_type or {}).get("storage_path") or ""
     prior_is_final = bool((prior_same_type or {}).get("is_final"))
     master_finalized = (
-        prior_sp.endswith("/audio/master.webm")
-        or prior_sp.endswith("/audio/master.wav")
+        prior_sp.rsplit("/", 1)[-1].startswith("master.")
         or prior_is_final
     )
     # #491 — the empty is_final "signal" chunk (file_size == 0) is a zero-byte COMPLETED marker, NOT
@@ -107,6 +115,7 @@ def apply_chunk_to_recording(
         "duration_seconds": duration_seconds,
         "chunk_seq": chunk_seq,
         "first_chunk_at": first_chunk_at,
+        "start_time_utc": resolved_start_utc,
         "metadata": {"sample_rate": sample_rate} if sample_rate else {},
         "created_at": _now_iso(),
         "is_final": new_is_final,

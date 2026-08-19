@@ -123,6 +123,7 @@ def build_router(
         is_final: Optional[bool] = Form(None),
         duration_seconds: Optional[float] = Form(None),
         sample_rate: Optional[int] = Form(None),
+        start_time_utc: Optional[str] = Form(None),
         metadata: Optional[str] = Form(None),
         authorization: Optional[str] = Header(default=None),
     ):
@@ -144,6 +145,9 @@ def build_router(
         is_final = is_final if is_final is not None else bool(meta.get("is_final", True))
         duration_seconds = duration_seconds if duration_seconds is not None else meta.get("duration_seconds")
         sample_rate = sample_rate if sample_rate is not None else meta.get("sample_rate")
+        # The recorder's own clock at its first frame. Persisted so a consumer can map a
+        # wall-clock moment onto an offset in this media without guessing at upload latency.
+        start_time_utc = start_time_utc or meta.get("start_time_utc")
 
         # Auth: accept either the INTERNAL_API_SECRET (the bot's internal upload uses it, like the
         # lifecycle callback; meeting is scoped by session_uid) OR a MeetingToken (carries its meeting_id).
@@ -168,6 +172,7 @@ def build_router(
                 media_type=media_type, media_format=media_format,
                 chunk_seq=chunk_seq, is_final=is_final,
                 duration_seconds=duration_seconds, sample_rate=sample_rate,
+                start_time_utc=start_time_utc,
             )
         except SessionNotFound as e:
             raise HTTPException(status_code=404, detail=str(e))
@@ -232,6 +237,10 @@ def build_router(
             "media_file_id": media_file_id,
             "raw_url": raw_url,
             "duration_seconds": (mf or {}).get("duration_seconds"),
+            # The wall-clock instant this media's first frame was captured. A consumer aligning a
+            # transcript moment to a media offset needs this anchor; without it the only proxy is
+            # the server's first-chunk arrival, which includes encode + upload latency.
+            "start_time_utc": (mf or {}).get("start_time_utc"),
         })
 
     @router.get("/recordings/{recording_id}/media/{media_file_id}/raw")
@@ -281,6 +290,10 @@ def build_router(
             content_type = "audio/wav"
         elif media_format == "webm":
             content_type = "audio/webm" if mf.get("type") == "audio" else "video/webm"
+        elif media_format == "mp4":
+            # The screencast recorder's container. A <video> served
+            # application/octet-stream refuses to play, so this must be explicit.
+            content_type = "video/mp4" if mf.get("type") == "video" else "audio/mp4"
         else:
             content_type = "application/octet-stream"
 

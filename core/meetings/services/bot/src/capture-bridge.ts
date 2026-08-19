@@ -36,7 +36,7 @@ import {
   type BrowserContext,
 } from '@vexa/remote-browser';
 import { getJoinBrowserArgs } from '@vexa/join';
-import { VideoRecordingService, type RecordingMasterFormat } from '@vexa/recording';
+import { RecordingService, VideoRecordingService, type RecordingMasterFormat } from '@vexa/recording';
 import { isMixedLanePlatform, type Invocation } from './config.js';
 import type { BotPipeline } from './pipeline.js';
 import type { BotRecordingSink } from './recording.js';
@@ -432,8 +432,41 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
  * converts them to a constant rate; see its docstring for why video time must equal wall time.
  */
 export async function startVideoRecording(page: Page, inv: Invocation): Promise<() => Promise<void>> {
-  const svc = new VideoRecordingService(inv.meeting_id ?? 0, inv.connectionId ?? 'session');
+  const meetingId = inv.meeting_id ?? 0;
+  const sessionUid = inv.connectionId ?? 'session';
+  const uploadUrl = inv.recordingUploadUrl;
+  const token = inv.internalSecret ?? '';
+  const uploader = new RecordingService(meetingId, sessionUid);
+
+  // The recorder's own clock at frame 0, stamped ONCE and sent with every chunk. This is the
+  // anchor that turns a transcript wall-clock moment into an offset in this file; the server's
+  // first-chunk arrival time only approximates it (it includes encode + upload latency).
+  let startTimeUtc: string | undefined;
+
+  // Must match the fps VideoRecordingService encodes at, since duration is derived from it.
+  const videoFps = Number(process.env.VEXA_VIDEO_FPS) || 5;
+
+  // Serialize uploads so parts land in seq order, mirroring createBotRecordingSink. A failed
+  // chunk is logged and skipped rather than retried out of order — a gap loses a span of video,
+  // but a reordered concat corrupts the whole file.
+  let queue: Promise<void> = Promise.resolve();
+  const onChunk = (seq: number, isFinal: boolean, bytes: Buffer): void => {
+    if (!uploadUrl) return;
+    queue = queue
+      .then(() => uploader.uploadChunk(uploadUrl, token, bytes, seq, isFinal, 'mp4', {
+        mediaType: 'video',
+        startTimeUtc,
+        // MEDIA seconds, taken from the frames actually handed to ffmpeg — not elapsed wall
+        // time. The two agree by design (that is the pacer's invariant), but the frame count is
+        // what the file will really contain, so it stays right even if the pacer ever lags.
+        durationSeconds: svc.getFramesWritten() / videoFps,
+      }))
+      .catch((e) => console.error(`[bot] video chunk ${seq} (isFinal=${isFinal}) upload failed — continuing: ${String(e)}`));
+  };
+
+  const svc = new VideoRecordingService(meetingId, sessionUid, uploadUrl ? onChunk : undefined);
   svc.start();
+  startTimeUtc = new Date(svc.getStartTime()).toISOString();
 
   const cdp = await page.context().newCDPSession(page);
 
@@ -463,8 +496,12 @@ export async function startVideoRecording(page: Page, inv: Invocation): Promise<
   return async () => {
     await cdp.send('Page.stopScreencast').catch(() => { /* page already gone */ });
     await cdp.detach().catch(() => { /* session already closed */ });
-    const filePath = await svc.stop();
-    console.log(`[bot] video recording finalized: ${filePath} (${svc.getFramesWritten()} frames)`);
+    await svc.stop();
+    // Await the upload queue so the COMPLETED signal is actually delivered before teardown
+    // continues — returning early would let the container exit mid-flight and leave the
+    // recording stuck IN_PROGRESS server-side.
+    await queue;
+    console.log(`[bot] video recording finalized: ${svc.getFramesWritten()} frames, ${svc.getChunksEmitted()} chunks, start=${startTimeUtc}`);
   };
 }
 

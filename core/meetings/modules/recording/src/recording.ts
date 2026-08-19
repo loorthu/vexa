@@ -5,6 +5,21 @@ import { log, logJSON } from './log';
 import http from 'http';
 import https from 'https';
 
+/** Per-chunk options for uploadChunk. Both default to the pre-video behaviour. */
+export interface UploadChunkOptions {
+  /** Stream namespace: "audio" (default) or "video". NOT the container — that is `format`. */
+  mediaType?: string;
+  /** ISO-8601 UTC instant of this stream's first frame, as measured by the recorder itself. */
+  startTimeUtc?: string;
+  /**
+   * Media seconds captured so far. Overrides the elapsed-time fallback, which is only correct for
+   * a RecordingService that is itself accumulating (this.startTime). A caller that merely borrows
+   * the uploader for another recorder's bytes has a startTime of 0 there, so the fallback yields
+   * undefined and the media file lands with a null duration.
+   */
+  durationSeconds?: number;
+}
+
 /**
  * RecordingService handles accumulating audio data and producing a WAV file.
  * Works in Node.js context — used directly for Zoom (native audio callback),
@@ -226,21 +241,32 @@ export class RecordingService {
     chunkSeq: number,
     isFinal: boolean,
     format: string = 'webm',
+    opts: UploadChunkOptions = {},
   ): Promise<void> {
     const uploadTimeoutMs = 30_000;
-    const durationSeconds = this.startTime > 0 ? (Date.now() - this.startTime) / 1000 : undefined;
+    const durationSeconds = opts.durationSeconds
+      ?? (this.startTime > 0 ? (Date.now() - this.startTime) / 1000 : undefined);
+    // media_type is the STREAM namespace (audio vs video), not the container — `format` is the
+    // container. It is what lets an audio chunk and a video chunk both be seq 0 in one session
+    // without colliding on the object key. Omitted ⇒ "audio", preserving every existing caller.
+    const mediaType = opts.mediaType ?? 'audio';
 
     const boundary = `----VexaRecordingChunk${Date.now()}${chunkSeq}`;
     const metadata = JSON.stringify({
       meeting_id: this.meetingId,
       session_uid: this.sessionUid,
       format: format,
+      media_type: mediaType,
       sample_rate: this.sampleRate,
       channels: this.channels,
       duration_seconds: durationSeconds,
       file_size_bytes: chunkData.length,
       chunk_seq: chunkSeq,
       is_final: isFinal,
+      // The recorder's OWN clock at frame 0 — the anchor that maps a transcript moment onto an
+      // offset in this media. The server's first-chunk arrival time only approximates it, since
+      // that includes encode and upload latency.
+      start_time_utc: opts.startTimeUtc,
     });
 
     const parts: Buffer[] = [];
@@ -249,7 +275,10 @@ export class RecordingService {
     parts.push(Buffer.from('\r\n'));
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chunk_seq"\r\n\r\n${chunkSeq}\r\n`));
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="is_final"\r\n\r\n${isFinal ? 'true' : 'false'}\r\n`));
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.${chunkSeq}.${format}"\r\nContent-Type: audio/${format}\r\n\r\n`));
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="media_type"\r\n\r\n${mediaType}\r\n`));
+    // The part's Content-Type must follow the STREAM, not be hardcoded audio/*: an h264 mp4
+    // announced as audio/mp4 is a mislabel that only surfaces later as a playback failure.
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.${chunkSeq}.${format}"\r\nContent-Type: ${mediaType}/${format}\r\n\r\n`));
     parts.push(chunkData);
     parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
 
