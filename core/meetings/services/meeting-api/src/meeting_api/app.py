@@ -147,7 +147,7 @@ def create_app(
     app.state.webhook_sink = webhook_sink
     # The lifecycle callback publishes each persisted FSM advance to bm:meeting:{id}:status so the
     # gateway /ws (which SUBSCRIBEs that channel) forwards a ws.v1 BotStatus frame to the dashboard.
-    _mount_lifecycle(app, sink, meeting_repo, webhook_sink, redis, transcript_finalizer)
+    _mount_lifecycle(app, sink, meeting_repo, webhook_sink, redis, transcript_finalizer, runtime)
 
     # --- bot_spawn: POST /bots (invocation.v1 + runtime.v1) ---
     app.include_router(_bot_spawn.build_router(meeting_repo, runtime))
@@ -189,6 +189,7 @@ def _mount_lifecycle(
     webhook_sink: "object" = None,
     redis: "object" = None,
     transcript_finalizer: "object" = None,
+    runtime: "object" = None,
 ) -> None:
     """Register the lifecycle.v1 callback route on the unified app (the lifecycle receiver's
     ``/bots/internal/callback/lifecycle`` handler, sharing the app's TraceMiddleware).
@@ -355,6 +356,36 @@ def _mount_lifecycle(
                 log_event("transcript_finalize_failed", audience="system", level="warning",
                           span="lifecycle.callback",
                           fields={"meeting_id": meeting_row.get("id"), "error": str(e)})
+        # WORKLOAD TEARDOWN — reap the bot's container once the run is terminal.
+        #
+        # Nothing did this for a bot that exited on its OWN. stop_router tears the workload down
+        # only for a BOOTING bot (an active one is asked to leave and expected to exit), and the
+        # reconcile sweep only chases orphans that are still alive. So every normally-finishing bot
+        # — user stop, evicted, alone, max-lifetime — left its exited container behind for ever.
+        #
+        # Terminal is the right moment because it is emitted AFTER the bot's teardown: the
+        # orchestrator awaits pipeline.stop() (which flushes and uploads the final recording chunks)
+        # before emitting `completed`. So the data is durable in object storage before the container
+        # that produced it is removed.
+        #
+        # Best-effort by design: a failed teardown must never fail the bot's callback, and the
+        # reconcile sweep remains the backstop. A 404 here is success — already gone.
+        if (
+            runtime is not None
+            and not change.no_op
+            and rec.status is not None
+            and rec.status.value in ("completed", "failed")
+            and isinstance(meeting_row, dict)
+            and meeting_row.get("bot_container_id")
+        ):
+            try:
+                await runtime.delete_workload(meeting_row["bot_container_id"])
+            except Exception as e:  # noqa: BLE001 — reconcile backstops; never fail the callback
+                log_event("workload_teardown_failed", audience="system", level="warning",
+                          span="lifecycle.callback",
+                          fields={"meeting_id": meeting_row.get("id"),
+                                  "workload_id": meeting_row.get("bot_container_id"),
+                                  "error": str(e)})
         # Build the TYPED event the transition maps to (meeting.started on active,
         # meeting.completed with the post-meeting envelope on completion, bot.failed on terminal
         # failure) — additive alongside meeting.status_change, never instead of it. Built AFTER the
