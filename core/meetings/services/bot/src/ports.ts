@@ -27,6 +27,10 @@ export interface JoinDriver {
   join(report: (s: BotStatus) => void | Promise<void>): Promise<JoinOutcome>;
   /** Watch for being removed from the meeting while active; returns a stop fn. */
   onRemoval(cb: () => void): () => void;
+  /** Watch for being the ONLY participant left; returns a stop fn. Optional so a driver with no
+   *  browser (or a test fake) need not implement it — absent means the bot simply never
+   *  self-leaves on an empty meeting, which is the pre-existing behaviour. */
+  onAlone?(cb: () => void): () => void;
   /** Leave the meeting (best-effort; never throws fatally). */
   leave(reason: string): Promise<void>;
   /** Withdraw a PENDING join request from the waiting room / pre-join screen (Bug 2): cancel the

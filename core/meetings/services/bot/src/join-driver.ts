@@ -11,6 +11,7 @@ import {
   AdmissionError,
   leaveGoogleMeet, leaveMicrosoftTeams, leaveZoomMeeting, leaveJitsiMeeting,
   startGoogleRemovalMonitor, startTeamsRemovalMonitor, startZoomRemovalMonitor, startJitsiRemovalMonitor,
+  startGoogleAloneMonitor,
   type JoinState, type Platform as JoinPlatform, type AdmissionOutcome,
 } from '@vexa/join';
 import type { BotStatus } from './contracts.js';
@@ -89,6 +90,15 @@ export function createBrowserJoinDriver(page: Page, inv: Invocation): JoinDriver
       if (platform === 'zoom')  return startZoomRemovalMonitor(page, cb);
       if (platform === 'jitsi') return startJitsiRemovalMonitor(page, cb);
       return startGoogleRemovalMonitor(page, cb);
+    },
+    onAlone(cb) {
+      // Google Meet only for now: the tile-counting selector is Meet-specific, and a wrong count
+      // on another platform would make the bot walk out of a live meeting. The other lanes keep
+      // the previous behaviour (no self-leave) until each has its own verified participant read.
+      if (platform === 'teams' || platform === 'zoom' || platform === 'jitsi') {
+        return () => { /* not implemented for this platform */ };
+      }
+      return startGoogleAloneMonitor(page, cb);
     },
     async leave(reason) {
       if (platform === 'teams') { await leaveMicrosoftTeams(page, undefined, reason); return; }
