@@ -20,7 +20,12 @@ from typing import Any, Optional
 
 from ..obs import log_event
 from ..recording_codec import build_recording_master
-from .jsonb import apply_chunk_to_recording, chunk_storage_key, master_storage_key, new_recording_numeric_id
+from .jsonb import (
+    apply_chunk_to_recording,
+    chunk_storage_key,
+    master_storage_key,
+    recording_id_for_session,
+)
 from .ports import RecordingRepo, Storage
 
 # Media content types (parent ``recording_codec._media_content_type``, reduced to the core set).
@@ -83,7 +88,10 @@ async def upload_chunk(
         (r for r in recordings if r.get("session_uid") == session_uid and r.get("source") == "bot"),
         None,
     )
-    recording_id = existing_rec["id"] if existing_rec else new_recording_numeric_id()
+    # DERIVED, not minted: two media streams' first chunks race here, and a per-caller random id
+    # would strand the loser's object under an id the fold then discards (see
+    # recording_id_for_session). Deriving from the session makes both compute the same id.
+    recording_id = existing_rec["id"] if existing_rec else recording_id_for_session(session_uid)
 
     # Upload the chunk to object storage (idempotent by key; OUTSIDE the row lock).
     key = chunk_storage_key(

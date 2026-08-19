@@ -164,3 +164,62 @@ async def test_raw_route_serves_video_mp4_content_type_and_honors_range():
     assert len(r.content) == 16
 
 
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_chunks_land_under_one_recording():
+    """FIELD BUG: the video's init segment was stranded under a discarded recording id.
+
+    Two media streams now upload at once. Each first chunk found no existing recording, minted its
+    OWN random id, and uploaded its object under that id. The JSONB fold then serialized under the
+    row lock and both converged on ONE recording — leaving the loser's object under an id nothing
+    referenced. The master, assembled from the surviving prefix, began mid-fragment:
+
+        trun track id unknown, no tfhd was found -> error reading header
+
+    Observed live: 9 of 10 video parts present, the missing one being chunk 0 (ftyp + moov), and the
+    whole recording unplayable. Deriving the id from the session removes the race by construction.
+
+    THE INTERLEAVING MUST BE FORCED. The in-memory fakes never actually suspend, so a plain
+    asyncio.gather runs the first upload to completion before the second begins and no race occurs —
+    a test written that way stays green WITHOUT the fix, which is worse than no test. The storage
+    fake below yields at exactly the point the real S3 call does: after the recording id has been
+    chosen, before the JSONB fold. That is the window the two streams collided in.
+    """
+    import asyncio
+
+    class YieldingStorage(InMemoryStorage):
+        """Suspends inside upload, like a real network call, so the other stream can interleave."""
+
+        async def upload(self, key: str, data: bytes, *, content_type: str) -> None:
+            await asyncio.sleep(0)
+            await super().upload(key, data, content_type=content_type)
+
+    repo = InMemoryRecordingRepo()
+    repo.seed(meeting_id=MEETING_ID, user_id=USER, session_uid=SESSION_UID)
+    storage = YieldingStorage()
+
+    video0 = b"\x00\x00\x00\x1cftypiso5" + b"\x11" * 32   # the init segment
+    audio0 = b"\x1a\x45\xdf\xa3" + b"\x22" * 32           # webm EBML header
+
+    # Both streams' FIRST chunk in flight together — neither can see an existing recording.
+    await asyncio.gather(
+        _upload(repo, storage, seq=0, is_final=False, data=video0, media_type="video", fmt="mp4"),
+        _upload(repo, storage, seq=0, is_final=False, data=audio0, media_type="audio", fmt="webm",
+                start_time_utc=None),
+    )
+
+    recs = await repo.list_meeting_recordings(USER)
+    assert len(recs) == 1, f"the two streams created {len(recs)} recordings; they must share one"
+    rec = recs[0]
+
+    # Every object must live under the surviving recording's prefix — nothing stranded.
+    all_keys = await storage.list("recordings/")
+    stray = [k for k in all_keys if f"/{rec['id']}/" not in k]
+    assert stray == [], f"objects stranded outside the recording: {stray}"
+
+    # And the assembled video master must START with the init segment.
+    key = await finalize_master(repo, storage, meeting_id=MEETING_ID,
+                                recording_id=rec["id"], media_type="video")
+    master = await storage.get(key)
+    assert master.startswith(video0[:12]), "master does not begin with ftyp — init segment lost"

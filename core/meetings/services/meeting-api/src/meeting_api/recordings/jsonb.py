@@ -8,6 +8,7 @@ is NO separate recordings table).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from datetime import datetime, timezone
@@ -25,6 +26,30 @@ def _now_iso() -> str:
 def new_recording_numeric_id() -> int:
     """A random 12-digit recording id (parent ``new_recording_numeric_id``)."""
     return int(uuid.uuid4().int % 900000000000 + 100000000000)
+
+
+def recording_id_for_session(session_uid: str) -> int:
+    """The recording id for a bot session — DERIVED from the session, not minted at random.
+
+    There is exactly one bot recording per session, but its id used to be minted independently by
+    whichever chunk arrived first. With two media streams that is a race: the audio tap's first
+    chunk and the video recorder's first chunk both find no existing recording, each mints its own
+    id, and each uploads its object under its own prefix. The JSONB fold then serializes under the
+    row lock and both converge on ONE recording — leaving the loser's object stranded under an id
+    nothing references.
+
+    That cost a whole recording. The video's chunk 0 carries the fragmented-mp4 init segment
+    (ftyp + moov); stranded, the assembled master began mid-fragment and no player would open it —
+    ``trun track id unknown, no tfhd was found``. Observed live 2026-08-19: 9 of 10 parts present,
+    master undecodable.
+
+    Deriving the id from the session_uid removes the race by construction rather than compensating
+    for it: concurrent first chunks compute the SAME id, so they upload to the same prefix and the
+    fold has nothing to reconcile. Same 12-digit shape as the random ids, and session_uid is a
+    uuid4, so collisions are not a practical concern.
+    """
+    digest = hashlib.sha256(session_uid.encode()).digest()
+    return int.from_bytes(digest[:8], "big") % 900000000000 + 100000000000
 
 
 def apply_chunk_to_recording(
