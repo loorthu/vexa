@@ -13,7 +13,7 @@
  * durable store. Cache/GPU/IndexedDB junk is excluded — ~200KB, not the full profile.
  */
 import { execSync } from 'child_process';
-import { existsSync, unlinkSync, mkdirSync, cpSync, mkdtempSync, rmSync, readdirSync, readlinkSync, statSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, unlinkSync, mkdirSync, cpSync, mkdtempSync, rmSync, readdirSync, readlinkSync, statSync, lstatSync, writeFileSync, readFileSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import type { Cookie } from 'playwright';
 
@@ -248,9 +248,20 @@ export function cleanStaleLocks(dir: string = BROWSER_DATA_DIR): void {
   const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
   for (const f of lockFiles) {
     const p = join(dir, f);
-    if (existsSync(p)) {
-      try { unlinkSync(p); } catch {}
+    // Chromium writes these as SYMLINKS (SingletonLock -> <hostname>-<pid>, SingletonSocket ->
+    // a path under the old container's /tmp). Once the writing container is gone those links
+    // dangle — and existsSync FOLLOWS a symlink, so it reports false for exactly the stale locks
+    // this function exists to remove. The container then restart-loops on "The profile appears to
+    // be in use by another Chromium process ... on another computer" until someone clears them by
+    // hand. lstatSync inspects the link itself, so a dangling link is still seen.
+    let present = false;
+    try { lstatSync(p); present = true; } catch { present = false; }
+    if (!present) continue;
+    try {
+      unlinkSync(p);
       console.log(`[session-store] Removed stale lock: ${f}`);
+    } catch (e: any) {
+      console.log(`[session-store] Could not remove stale lock ${f}: ${e?.message ?? String(e)}`);
     }
   }
 }
