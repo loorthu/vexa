@@ -57,6 +57,23 @@ def _auth_unavailable_response(exc: Exception, *, span: str) -> Response:
         headers={"Retry-After": "1"},
     )
 
+# Response headers the proxy forwards from downstream. Anything not listed is dropped, so a route
+# whose answer lives partly in a header must add it here:
+#   * x-chunk-sha256 / x-chunk-seq — a recording part's identity, so the caller can verify the
+#     bytes it just received rather than trusting the transfer.
+#   * content-range / accept-ranges — without these a 206 is malformed to a media element and
+#     seeking fails, even though meeting-api implements Range correctly.
+#   * content-disposition — the filename for a download.
+# content-length is deliberately absent: it must describe the body this hop returns, which
+# Starlette computes.
+_PASSTHROUGH_RESPONSE_HEADERS = (
+    "x-chunk-sha256",
+    "x-chunk-seq",
+    "content-range",
+    "accept-ranges",
+    "content-disposition",
+)
+
 # Route-prefix → required scope set. Mirrors main.py ROUTE_SCOPES (main.py:59-65) for the CORE
 # surface the gateway lane carves; multi-scope tokens pass for any of their domains.
 ROUTE_SCOPES: Dict[str, Set[str]] = {
@@ -280,13 +297,33 @@ def create_app(
         )
 
         # Return downstream body + status VERBATIM (drop hop-by-hop headers; main.py:367).
+        #
+        # "Verbatim" used to mean body + status only: every response header except content-type was
+        # dropped. That silently broke any route whose ANSWER is partly in its headers —
+        # X-Chunk-Sha256 arrived empty, so a client mirroring a recording could not verify the part
+        # it had just been handed, and a 206 arrived without Content-Range, which a <video> treats
+        # as malformed and refuses to seek on.
+        #
+        # An allowlist, not a blanket copy: hop-by-hop headers (Connection, Transfer-Encoding, …)
+        # describe THIS hop and must not be forwarded, and Content-Length must describe the body we
+        # actually return rather than whatever the upstream computed.
         resp_headers = resp.headers
         media_type = "application/json"
         try:
             media_type = resp_headers.get("content-type", "application/json")
         except Exception:
             pass
-        return Response(content=resp.content, status_code=resp.status_code, media_type=media_type)
+        passthrough = {
+            k: resp_headers[k]
+            for k in _PASSTHROUGH_RESPONSE_HEADERS
+            if k in resp_headers
+        }
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type=media_type,
+            headers=passthrough or None,
+        )
 
     def _meeting(path: str) -> str:
         return f"{meeting_api_url}{path}"

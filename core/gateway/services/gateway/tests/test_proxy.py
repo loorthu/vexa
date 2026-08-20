@@ -292,3 +292,64 @@ def test_user_models_and_transcription_routes_forward_to_admin_api():
         assert downstream.last["url"] == f"http://admin-api{path}"
 
         assert client.get(path).status_code == 401  # no key → the edge refuses
+
+
+class HeaderfulDownstream(FakeDownstream):
+    """A downstream whose ANSWER is partly in its response headers."""
+
+    def __init__(self, headers: dict, status_code: int = 200):
+        super().__init__(status_code=status_code)
+        self._extra = headers
+
+    async def request(self, method, url, *, headers=None, params=None, content=None):
+        from conftest import _Resp
+
+        self.last = {"method": method, "url": url, "headers": headers or {},
+                     "params": params, "content": content}
+        hdrs = {"content-type": "video/mp4", **self._extra}
+        return _Resp(self.status_code, b"\x00\x01\x02\x03", hdrs)
+
+
+def test_answer_bearing_response_headers_survive_the_proxy():
+    """FIELD BUG: the proxy returned body + status only, dropping every response header.
+
+    Routes whose answer is partly in a header silently lost it. X-Chunk-Sha256 came back EMPTY,
+    so a client mirroring a recording could not verify the part it had just been handed — it had
+    the bytes and no way to check them. Observed live through the DNA relay.
+
+    A 206 with no Content-Range is the same class of failure: meeting-api implements Range
+    correctly, and a media element still refuses to seek because the answer never arrives.
+    """
+    down = HeaderfulDownstream({
+        "x-chunk-sha256": "f8b1c0aaa51135e476c8df2877e8f945d578e661f4861070a4ca3057fd474a83",
+        "x-chunk-seq": "0",
+    })
+    client = TestClient(create_app(FakeAuthorizer(), down, FakeRedis()))
+    r = client.get("/recordings/1/media/2/chunks/0", headers=AUTH)
+
+    assert r.status_code == 200
+    assert r.headers["x-chunk-sha256"].startswith("f8b1c0aa")
+    assert r.headers["x-chunk-seq"] == "0"
+    assert r.content == b"\x00\x01\x02\x03"
+
+
+def test_range_headers_survive_the_proxy():
+    """A 206 is malformed to a media element without Content-Range."""
+    down = HeaderfulDownstream(
+        {"content-range": "bytes 0-15/1024", "accept-ranges": "bytes"}, status_code=206
+    )
+    client = TestClient(create_app(FakeAuthorizer(), down, FakeRedis()))
+    r = client.get("/recordings/1/media/2/raw", headers=AUTH)
+
+    assert r.status_code == 206
+    assert r.headers["content-range"] == "bytes 0-15/1024"
+    assert r.headers["accept-ranges"] == "bytes"
+
+
+def test_unlisted_response_headers_are_still_dropped():
+    """An allowlist, not a blanket copy — hop-by-hop headers describe THIS hop, not the next."""
+    down = HeaderfulDownstream({"connection": "keep-alive", "x-internal-debug": "leaky"})
+    client = TestClient(create_app(FakeAuthorizer(), down, FakeRedis()))
+    r = client.get("/recordings/1/media/2/chunks/0", headers=AUTH)
+
+    assert "x-internal-debug" not in r.headers
