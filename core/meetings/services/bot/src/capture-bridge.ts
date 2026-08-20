@@ -386,11 +386,27 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
     const n = raw ? parseInt(raw, 10) : NaN;
     return Number.isFinite(n) && n > 0 ? n : 15000;
   })();
+  // The audio stream's own t0, on THIS process's clock — the same clock startVideoRecording stamps
+  // its video t0 with. That shared clock is the whole point: the collector muxes by the DIFFERENCE
+  // between the two anchors, so taking both from one process makes the offset exact and immune to
+  // skew between the bot and the (possibly different) session-browser container.
+  //
+  // Stamped when the tap actually starts, not when the first chunk lands — the first chunk arrives
+  // a full timeslice (15s) after recording began, so stamping on arrival would claim the audio
+  // started 15s late and the mux would shove it that far out of sync.
+  let audioStartMs = 0;
+  let audioStartTimeUtc: string | undefined;
+
   // Node-side: decode one base64 recording.v1 chunk → the per-chunk upload sink. mimeType→format.
   await page.exposeFunction('__vexaRecordingChunk', (base64: string, chunkSeq: number, isFinal: boolean, mimeType: string): void => {
     const bytes = base64 ? new Uint8Array(Buffer.from(base64, 'base64')) : new Uint8Array(0);
     const format: RecordingMasterFormat = /wav/i.test(mimeType) ? 'wav' : 'webm';
-    recording.chunk(key, chunkSeq, isFinal, format, bytes);
+    recording.chunk(key, chunkSeq, isFinal, format, bytes, {
+      startTimeUtc: audioStartTimeUtc,
+      // Cumulative media seconds. MediaRecorder produces in real time, so elapsed-since-start is
+      // the honest measure; the server takes the newest value, so each chunk advances it.
+      durationSeconds: audioStartMs > 0 ? (Date.now() - audioStartMs) / 1000 : undefined,
+    });
   }).catch((e: Error) => { if (!String(e.message).includes('already registered')) throw e; });
 
   // Page-side: start the generic recording tap (finds + combines the page audio elements).
@@ -407,6 +423,13 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
       await w.__vexaRecordingTap.start();
     }
   }, timesliceMs).catch((e) => { console.error(`[bot] recording bridge: page-side start failed: ${String(e)}`); });
+
+  // The tap is live as of here. Taken AFTER the evaluate resolves rather than before it, so the
+  // page-side round trip counts as pre-roll (audio starting marginally later than claimed) instead
+  // of as audio the file does not contain — the latter would drag the whole track early.
+  audioStartMs = Date.now();
+  audioStartTimeUtc = new Date(audioStartMs).toISOString();
+  console.log(`[bot] audio recording started: start=${audioStartTimeUtc}`);
 
   // Stop fn: stop the recorder so it flushes the final (isFinal) chunk → master assembly.
   return async () => {

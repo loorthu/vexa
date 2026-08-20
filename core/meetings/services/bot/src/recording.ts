@@ -33,18 +33,32 @@ import { RecordingService, type RecordingMasterFormat } from '@vexa/recording';
 import type { Invocation } from './config.js';
 import type { RecordingSink } from './ports.js';
 
+/** What the CHUNK SOURCE knows about the stream that the sink cannot work out for itself.
+ *  Both are per-stream constants-so-far, not per-chunk facts: the server folds them first-write-wins
+ *  (start) and last-write-wins (duration), exactly as the video path already relies on. */
+export interface ChunkStreamInfo {
+  /** ISO-8601 UTC of this stream's FIRST frame, on the recorder's own clock. */
+  startTimeUtc?: string;
+  /** Media seconds captured so far — cumulative, not this chunk's share. */
+  durationSeconds?: number;
+}
+
 /** The RecordingSink extended with the chunk ingress the capture bridge's MediaRecorder tap pumps
  *  into. The orchestrator only sees close(key); the bridge holds the BotRecordingSink to feed chunks
  *  as they arrive from the page-side recorder. */
 export interface BotRecordingSink extends RecordingSink {
   /** One recording.v1 chunk for `key`: monotonic seq, the COMPLETED-signal flag, format, bytes. */
-  chunk(key: string, seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void;
+  chunk(
+    key: string, seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array,
+    info?: ChunkStreamInfo,
+  ): void;
 }
 
 /** Deliver ONE recording.v1 chunk. The default uploads to inv.recordingUploadUrl via
  *  RecordingService.uploadChunk; tests inject a fake to assert per-chunk delivery without HTTP. */
 export type ChunkUploader = (
   seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array,
+  info?: ChunkStreamInfo,
 ) => void | Promise<void>;
 
 export interface RecordingSinkOptions {
@@ -64,12 +78,20 @@ function defaultChunkUploader(inv: Invocation, log: (m: string) => void): ChunkU
   const sessionUid = inv.connectionId ?? '';
   const token = inv.internalSecret ?? '';
   const svc = new RecordingService(meetingId, sessionUid);
-  return async (seq, isFinal, format, bytes) => {
+  return async (seq, isFinal, format, bytes, info) => {
     if (!url) {
       log(`recording: no recordingUploadUrl — chunk ${seq} (${bytes.length}B, isFinal=${isFinal}) NOT uploaded`);
       return;
     }
-    await svc.uploadChunk(url, token, Buffer.from(bytes), seq, isFinal, format);
+    // The stream info must be forwarded, not dropped. This RecordingService is only BORROWED as an
+    // uploader — it never accumulated anything, so its own this.startTime is 0 and uploadChunk's
+    // elapsed-time fallback yields undefined. Without these the audio media file lands with a null
+    // start_time_utc and a null duration, and the collector muxing audio onto video has no way to
+    // know how far behind the video the audio actually starts.
+    await svc.uploadChunk(url, token, Buffer.from(bytes), seq, isFinal, format, {
+      startTimeUtc: info?.startTimeUtc,
+      durationSeconds: info?.durationSeconds,
+    });
   };
 }
 
@@ -86,25 +108,35 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
   let finalSent = false;                               // has an is_final chunk been sent? (fallback guard)
   let maxSeq = -1;                                     // highest seq seen → the fallback's seq
   let lastFormat: RecordingMasterFormat = 'webm';      // format for the empty-final fallback
+  let lastInfo: ChunkStreamInfo | undefined;           // stream info for the empty-final fallback
 
-  const enqueue = (seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void => {
+  const enqueue = (
+    seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array,
+    info?: ChunkStreamInfo,
+  ): void => {
     anyChunk = true;
     if (isFinal) finalSent = true;
     if (seq > maxSeq) maxSeq = seq;
     lastFormat = format;
+    if (info) lastInfo = info;
     queue = queue
-      .then(() => upload(seq, isFinal, format, bytes))
+      .then(() => upload(seq, isFinal, format, bytes, info))
       .catch((e) => { log(`recording: chunk ${seq} (isFinal=${isFinal}) upload failed — continuing: ${String(e)}`); });
   };
 
   return {
-    chunk: (_key, seq, isFinal, format, bytes) => { enqueue(seq, isFinal, format, bytes); },
+    chunk: (_key, seq, isFinal, format, bytes, info) => { enqueue(seq, isFinal, format, bytes, info); },
     close: (_key) => {
       // Final-signal FALLBACK: if the live Stop race dropped the trailing is_final chunk, send one
       // empty is_final so the server flips the recording COMPLETED. No-op for a never-fed session
       // (no phantom recording), and at most once (a real is_final already set finalSent).
+      //
+      // It carries the LAST stream info seen. start_time_utc is first-write-wins server-side so it
+      // changes nothing there, but duration is last-write-wins — and this fallback is routinely the
+      // final word on the recording, so sending it blank would erase the duration the real chunks
+      // established.
       if (!anyChunk || finalSent) return;
-      enqueue(maxSeq + 1, true, lastFormat, new Uint8Array(0));
+      enqueue(maxSeq + 1, true, lastFormat, new Uint8Array(0), lastInfo);
     },
   };
 }

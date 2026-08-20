@@ -17,7 +17,7 @@
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createBotRecordingSink, type ChunkUploader } from './recording.js';
+import { createBotRecordingSink, type ChunkUploader, type ChunkStreamInfo } from './recording.js';
 import type { Invocation } from './config.js';
 import type { RecordingMasterFormat } from '@vexa/recording';
 
@@ -33,11 +33,11 @@ const inv = (over: Partial<Invocation> = {}): Invocation => ({
 });
 
 /** A record of one delivered chunk (what the injected uploader saw). */
-interface Seen { seq: number; isFinal: boolean; format: string; len: number }
+interface Seen { seq: number; isFinal: boolean; format: string; len: number; info?: ChunkStreamInfo }
 function fakeUploader(): { seen: Seen[]; upload: ChunkUploader } {
   const seen: Seen[] = [];
-  const upload: ChunkUploader = (seq, isFinal, format, bytes) => {
-    seen.push({ seq, isFinal, format, len: bytes.length });
+  const upload: ChunkUploader = (seq, isFinal, format, bytes, info) => {
+    seen.push({ seq, isFinal, format, len: bytes.length, info });
   };
   return { seen, upload };
 }
@@ -123,9 +123,41 @@ async function main(): Promise<void> {
     check('empty session: close is a no-op (no upload)', seen.length === 0, String(seen.length));
   }
 
+  // ── 6b) the audio stream's anchor reaches the uploader, and survives the close() fallback ─────
+  //
+  // The collector muxes audio onto video by the DIFFERENCE between the two streams' start_time_utc.
+  // Audio used to send neither anchor nor duration (the sink simply had nowhere to carry them), so
+  // the audio media file landed with both null and the mux had to assume the streams start together.
+  {
+    const { seen, upload } = fakeUploader();
+    const sink = createBotRecordingSink({ inv: inv(), uploadChunk: upload });
+    const t0 = '2026-08-20T17:04:05.123Z';
+    sink.chunk('google_meet/m6b', 0, false, 'webm', new Uint8Array([1]), { startTimeUtc: t0, durationSeconds: 15 });
+    sink.chunk('google_meet/m6b', 1, false, 'webm', new Uint8Array([2]), { startTimeUtc: t0, durationSeconds: 30 });
+    await flush();
+    check('stream info: start_time_utc forwarded on every chunk',
+      seen.length === 2 && seen.every((s) => s.info?.startTimeUtc === t0),
+      JSON.stringify(seen.map((s) => s.info?.startTimeUtc)));
+    check('stream info: duration is CUMULATIVE, advancing per chunk (15 → 30)',
+      seen.map((s) => s.info?.durationSeconds).join(',') === '15,30',
+      seen.map((s) => s.info?.durationSeconds).join(','));
+
+    // The fallback is routinely the LAST word on the recording, and duration is last-write-wins
+    // server-side — so a blank fallback would erase the duration the real chunks established.
+    sink.close('google_meet/m6b');
+    await flush();
+    const fin = seen[2];
+    check('stream info: the synthesized final carries the last anchor forward (not blank)',
+      !!fin && fin.isFinal && fin.info?.startTimeUtc === t0 && fin.info?.durationSeconds === 30,
+      JSON.stringify(fin));
+  }
+
   // ── 7) the DEFAULT uploader on the real RecordingService HTTP wire: session_uid == connectionId ──
   {
-    interface Wire { session_uid?: string; chunk_seq?: number; is_final?: boolean; format?: string; size?: number }
+    interface Wire {
+      session_uid?: string; chunk_seq?: number; is_final?: boolean; format?: string; size?: number;
+      start_time_utc?: string | null; duration_seconds?: number | null;
+    }
     const wire: Wire[] = [];
     const server = http.createServer((req, res) => {
       const parts: Buffer[] = [];
@@ -139,6 +171,8 @@ async function main(): Promise<void> {
           session_uid: meta.session_uid as string, chunk_seq: meta.chunk_seq as number,
           is_final: meta.is_final as boolean, format: meta.format as string,
           size: meta.file_size_bytes as number,
+          start_time_utc: meta.start_time_utc as string | null,
+          duration_seconds: meta.duration_seconds as number | null,
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
@@ -150,9 +184,10 @@ async function main(): Promise<void> {
     const sink = createBotRecordingSink({
       inv: inv({ connectionId: 'conn-xyz', meeting_id: 42, recordingUploadUrl: url, internalSecret: 's' }),
     });
-    sink.chunk('google_meet/w', 0, false, 'webm', new Uint8Array([1, 2, 3, 4]));
-    sink.chunk('google_meet/w', 1, false, 'webm', new Uint8Array([5, 6]));
-    sink.chunk('google_meet/w', 2, true, 'webm', new Uint8Array(0));
+    const wt0 = '2026-08-20T17:00:00.000Z';
+    sink.chunk('google_meet/w', 0, false, 'webm', new Uint8Array([1, 2, 3, 4]), { startTimeUtc: wt0, durationSeconds: 15 });
+    sink.chunk('google_meet/w', 1, false, 'webm', new Uint8Array([5, 6]), { startTimeUtc: wt0, durationSeconds: 30 });
+    sink.chunk('google_meet/w', 2, true, 'webm', new Uint8Array(0), { startTimeUtc: wt0, durationSeconds: 31 });
     for (let i = 0; i < 100 && wire.length < 3; i++) await new Promise((r) => setTimeout(r, 10));
     await new Promise<void>((r) => server.close(() => r()));
 
@@ -163,6 +198,14 @@ async function main(): Promise<void> {
     check('wire: seq order 0,1,2', wire.map((w) => w.chunk_seq).join(',') === '0,1,2', wire.map((w) => w.chunk_seq).join(','));
     check('wire: only the LAST chunk is_final', wire.map((w) => w.is_final).join(',') === 'false,false,true',
       wire.map((w) => w.is_final).join(','));
+    // Through the REAL RecordingService.uploadChunk multipart, not just the injected uploader —
+    // this is the arm that would have caught the anchor being dropped on the way to the metadata.
+    check('wire: start_time_utc reaches the multipart metadata on every chunk',
+      wire.length === 3 && wire.every((w) => w.start_time_utc === wt0),
+      JSON.stringify(wire.map((w) => w.start_time_utc)));
+    check('wire: duration_seconds is the caller\'s cumulative value, not the borrowed uploader\'s 0-startTime fallback',
+      wire.map((w) => w.duration_seconds).join(',') === '15,30,31',
+      wire.map((w) => w.duration_seconds).join(','));
   }
 
   if (failed) { console.error(`\n❌ recording (L3): ${failed} check(s) FAILED.`); process.exit(1); }
