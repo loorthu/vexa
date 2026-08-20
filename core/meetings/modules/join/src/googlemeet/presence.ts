@@ -18,19 +18,35 @@ import { log } from "../_host";
 const EFFECTS_TILE = /visual_effects|backgrounds and effects/i;
 
 /**
- * Real participant tiles, or `null` when the page could not be read.
+ * OTHER people in the meeting — the bot excluded — or `null` when the page could not be read.
+ *
+ * COUNTING OTHERS, NOT EVERYONE, is the contract, and getting it wrong walked the bot out of a
+ * live meeting. `[data-participant-id]` matches the REMOTE tiles; Meet marks the bot's own tile
+ * with `data-self-name` instead, so the bot does not appear in this count at all. The monitor
+ * originally assumed it did and treated a count of 1 as "only me" — which is exactly what a
+ * meeting with one other person looks like, so the bot left every one-on-one after the grace
+ * period with the other person still sitting there.
+ *
+ * The self tile is filtered explicitly rather than relying on it being absent, so this stays
+ * correct if a Meet build ever starts tagging it with both attributes. Either way the number
+ * means the same thing: people who are not the bot. Zero of them is alone.
  *
  * The null is load-bearing. A DOM read can fail transiently (navigation, a detached frame) and a
  * failure is NOT evidence of an empty meeting — treating it as zero would make a broken selector
  * or a page hiccup look identical to everyone leaving, and the bot would walk out of a live
  * meeting. Only a successful count is allowed to advance the alone timer.
  */
-export async function countParticipantsOrNull(page: Page): Promise<number | null> {
+export async function countOtherParticipantsOrNull(page: Page): Promise<number | null> {
   try {
-    const labels = await page.locator("[data-participant-id]").evaluateAll(
-      els => els.map(e => e.getAttribute("aria-label") || (e.textContent || "").trim()),
+    const tiles = await page.locator("[data-participant-id]").evaluateAll(
+      els => els.map(e => ({
+        label: e.getAttribute("aria-label") || (e.textContent || "").trim(),
+        isSelf: e.hasAttribute("data-self-name")
+          || !!e.querySelector("[data-self-name]")
+          || !!e.closest("[data-self-name]"),
+      })),
     );
-    return labels.filter(l => l && !EFFECTS_TILE.test(l)).length;
+    return tiles.filter(t => t.label && !EFFECTS_TILE.test(t.label) && !t.isSelf).length;
   } catch {
     return null;
   }
@@ -43,16 +59,17 @@ export interface AloneMonitorOptions {
   pollMs?: number;
   /** Injected for tests. */
   now?: () => number;
-  /** Injected for tests: the participant read. */
+  /** Injected for tests: the read of how many OTHER people are present. */
   count?: (page: Page) => Promise<number | null>;
 }
 
 /**
- * Fire `onAlone` once the bot has been the ONLY participant continuously for the grace period.
+ * Fire `onAlone` once NOBODY ELSE has been in the meeting continuously for the grace period.
  *
- * The bot's own tile counts, so "alone" is <= 1. A grace period rather than an instant trip
- * because a count can dip legitimately — the last human reconnecting, a tile re-rendering — and
- * leaving on a blip would cut a live meeting short. The timer resets the moment anyone is seen.
+ * "Alone" is zero others — the bot is not in its own count (see countOtherParticipantsOrNull).
+ * A grace period rather than an instant trip because a count can dip legitimately — the last
+ * human reconnecting, a tile re-rendering — and leaving on a blip would cut a live meeting
+ * short. The timer resets the moment anyone is seen.
  */
 export function startGoogleAloneMonitor(
   page: Page,
@@ -63,7 +80,7 @@ export function startGoogleAloneMonitor(
   const graceMs = opts.graceMs ?? (Number(process.env.VEXA_ALONE_TIMEOUT_MS) || 120_000);
   const pollMs = opts.pollMs ?? 5_000;
   const now = opts.now ?? Date.now;
-  const count = opts.count ?? countParticipantsOrNull;
+  const count = opts.count ?? countOtherParticipantsOrNull;
 
   let aloneSince: number | null = null;
   let fired = false;
@@ -74,8 +91,10 @@ export function startGoogleAloneMonitor(
     const n = await count(page);
     if (n === null) return;               // unreadable ≠ empty; hold the current state
 
-    if (n > 1) {
-      if (aloneSince !== null) log(`[alone] ${n} participants — no longer alone`);
+    // ONE other person is a meeting, not an empty room. This read as `n > 1` before, which made
+    // every one-on-one look empty and walked the bot out of it after the grace period.
+    if (n > 0) {
+      if (aloneSince !== null) log(`[alone] ${n} other participant(s) — no longer alone`);
       aloneSince = null;
       return;
     }
