@@ -10,8 +10,12 @@ ones are the ones nobody wrote down.
 the code says today — that changes, and a stale note is worse than none. Re-derive specifics when
 picking one up.
 
-**Scope: the vexa fork only.** DNA's open questions live in its own plan doc. Operational how-to
-(build order, TLS, running the stack) belongs in `MEETING-RECORDING-PLAYBACK-NOTES.md`.
+**Scope: the vexa fork only** — what is specific to Vexa's own functionality and how this fork
+implements it. The meeting-recording feature spans both repositories, and its design and
+operational notes live once, in the DNA repository
+(`.cursor/plans/meeting_recording_playback.plan.md` and `SPI_NOTES.md`) — including the build
+order, TLS setup and stack bring-up for the services here. Duplicating them was already letting
+the two copies drift apart.
 
 Resolved entries move to the decision log rather than being deleted — the reasoning is the point.
 
@@ -86,7 +90,22 @@ upstream has changed, so this collides with entry 1 — settle it before or duri
 
 ---
 
-## 5. Non-monotonic DTS at audio chunk boundaries
+## 5. The CA patches exist only in locally-built images
+
+**Status: OPEN, environment-specific.**
+
+The internal network's TLS interception means the bot's browser needs the internal root CA in its
+NSS store, and the Python and Node builds need it too. That injection currently lives only in
+images built by hand on one machine, so `make bot` wipes it and anyone else on the VPN gets to
+rediscover the whole thing.
+
+If this fork is going to be built regularly here, the injection belongs in the Dockerfiles behind
+a build arg that is empty by default — off for upstream, set internally. Until then it is a trap
+with no marker on it.
+
+---
+
+## 6. Non-monotonic DTS at audio chunk boundaries
 
 **Status: OPEN — observed 2026-08-21, not diagnosed.**
 
