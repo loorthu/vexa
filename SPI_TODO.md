@@ -105,7 +105,32 @@ with no marker on it.
 
 ---
 
-## 6. Non-monotonic DTS at audio chunk boundaries
+## 6. The pre-push gates validate the working tree, not the repository
+
+**Status: OPEN — blocks every push from a machine that has ever run the stack.**
+
+`gate:readme` walks the filesystem and fails on directories that are gitignored and contain
+nothing tracked: downloaded model caches, build output, `__pycache__`. On this machine 18 of 18
+failures were of exactly that kind, and not one was a tracked directory genuinely missing a
+README. Since the gate can never pass, the only way to push is `--no-verify` — which skips
+*every* gate, so the check meant to protect the repository ends up disabling all of them.
+
+The cause is one function: `walkDirs` in `scripts/gates.mjs` enumerates directories with
+`readdirSync`, skipping only dot-names, a small hardcoded set, and directories holding a
+`.gateignore`. Nothing consults `.gitignore`, so the gates judge the machine rather than the
+repository. Anything a contributor's checkout accumulates becomes a push failure.
+
+A `.gateignore` marker per offending directory works and needs no commit (they sit inside ignored
+paths), but it is the same workaround repeated forever, and only on the machine that applied it.
+
+**The fix is small and belongs upstream**, not in this fork: have the walk skip anything
+`git check-ignore` claims, or enumerate from `git ls-files` instead. Worth raising there rather
+than patching here — it costs every contributor, not just us, and this fork's divergence is
+already entry 2's problem.
+
+---
+
+## 7. Non-monotonic DTS at audio chunk boundaries
 
 **Status: OPEN — observed 2026-08-21, not diagnosed.**
 
