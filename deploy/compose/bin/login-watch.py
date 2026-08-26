@@ -10,9 +10,12 @@ silently fail to join until a human re-logs in over noVNC.
 This watches for that and fires ONE notification per expiry so a human knows to
 go re-login. It reuses the same "are we signed in?" heuristic as the bot's
 remote-browser module (modules/remote-browser/src/validate.ts): open a throwaway
-tab at the platform account page via the session's in-container CDP HTTP endpoint,
-see whether it settles on the account page or gets bounced to a sign-in URL, then
-close the tab. Pure docker + curl for the probe — no browser deps on the host.
+tab via the session's in-container CDP HTTP endpoint, see whether it settles where
+it was sent or gets bounced to a sign-in URL, then close the tab. Pure docker +
+curl for the probe — no browser deps on the host.
+
+It probes the account page AND the meeting service (see PROBE_URLS): those two can
+disagree, and it is the service's answer that decides whether bots can join.
 
 Commands:
   login-watch.py            Probe; on a logged-in -> logged-out transition, notify once.
@@ -39,26 +42,36 @@ import time
 from datetime import datetime
 
 # --- probe config per platform (mirrors remote-browser/src/validate.ts) -------
-ACCOUNT_URLS = {
-    "google": "https://myaccount.google.com/",
-    "zoom": "https://zoom.us/profile",
-    "teams": "https://teams.microsoft.com/",
+# Probed in order; the first stage that is not signed in decides the answer.
+#
+# The account page alone is NOT enough. A session can be alive for the account and
+# still be refused by the meeting service: on 2026-08-26 this profile settled
+# happily on myaccount.google.com while every meeting URL bounced to
+# meet.google.com/reauth -> accounts.google.com/v3/signin/challenge/pwd ("To
+# continue, first verify it's you"). The watcher reported logged_in through three
+# hourly runs while every bot died at the join screen. So probe the surface the
+# bots actually use, not just the one that proves a cookie still exists.
+#
+# SESSION_PROBE_URLS (comma-separated) overrides this, e.g. to point the second
+# stage at a standing meeting room URL if a service landing page ever proves too
+# lenient to catch a re-auth demand.
+PROBE_URLS = {
+    "google": ["https://myaccount.google.com/", "https://meet.google.com/"],
+    "zoom": ["https://zoom.us/profile"],
+    "teams": ["https://teams.microsoft.com/"],
 }
 # If the tab settles on a URL containing any of these, we were bounced to sign-in.
+# "/reauth" earns its place: that bounce keeps the service's own origin, so without
+# it the origin check below reads a re-auth demand as being signed in.
 SIGNIN_MARKERS = {
     "google": ["accounts.google.com/signin", "accounts.google.com/v3/signin",
-               "ServiceLogin", "/signin/v2"],
+               "ServiceLogin", "/signin/v2", "/signin/challenge", "/reauth"],
     "zoom": ["zoom.us/signin", "/signin", "/login"],
     "teams": ["login.microsoftonline.com", "login.live.com", "/_#/login"],
 }
-# A settled URL starting with this means we're still signed in.
-LOGGEDIN_PREFIX = {
-    "google": "https://myaccount.google.com",
-    "zoom": "https://zoom.us/profile",
-    "teams": "https://teams.microsoft.com",
-}
 
 PLATFORM = os.getenv("SESSION_PLATFORM", "google").lower()
+PROBE_OVERRIDE = [u.strip() for u in os.getenv("SESSION_PROBE_URLS", "").split(",") if u.strip()]
 CONTAINER = os.getenv("BROWSER_SESSION_CONTAINER") or \
     f"vexa-browser-session-{os.getenv('USER_ID', '1')}"
 CDP = os.getenv("BROWSER_SESSION_CDP", "http://127.0.0.1:9222")  # inside the container
@@ -104,14 +117,35 @@ def _curl(url, method="GET"):
     return _dexec(args)
 
 
+def _origin(url):
+    """https://meet.google.com/foo?x=1 -> https://meet.google.com"""
+    scheme, _, rest = url.partition("://")
+    return f"{scheme}://{rest.split('/', 1)[0]}"
+
+
 def probe_login():
-    """Return 'logged_in', 'logged_out', or 'error' (unreachable/ambiguous)."""
-    if PLATFORM not in ACCOUNT_URLS:
+    """Return 'logged_in', 'logged_out', or 'error' (unreachable/ambiguous).
+
+    Runs every stage in PROBE_URLS until one says we are not signed in, so a
+    service-scoped re-auth demand counts as logged out even while the account
+    page is perfectly happy.
+    """
+    if PLATFORM not in PROBE_URLS:
         log(f"PROBE error: unknown SESSION_PLATFORM={PLATFORM!r}")
         return "error"
-    check_url = ACCOUNT_URLS[PLATFORM]
+    urls = PROBE_OVERRIDE or PROBE_URLS[PLATFORM]
+
+    for url in urls:
+        result = _probe_url(url)
+        if result != "logged_in":
+            return result
+    return "logged_in"
+
+
+def _probe_url(check_url):
+    """Probe one URL: open a throwaway tab, see where it settles, close it."""
     markers = SIGNIN_MARKERS[PLATFORM]
-    prefix = LOGGEDIN_PREFIX[PLATFORM]
+    prefix = _origin(check_url)
 
     try:
         tab = json.loads(_curl(f"{CDP}/json/new?{check_url}", method="PUT"))
@@ -121,6 +155,7 @@ def probe_login():
         return "error"
 
     final_url = None
+    stable = 0
     try:
         for _ in range(12):  # ~18s max for the redirect chain to settle
             time.sleep(1.5)
@@ -134,7 +169,13 @@ def probe_login():
             url = match.get("url", "")
             if url and url != "about:blank" and "/RotateCookies" not in url:
                 final_url = url
-                if url.startswith(prefix) or any(m in url for m in markers):
+                if any(m in url for m in markers):
+                    break  # a sign-in bounce is the end of the story
+                # Landing on the right origin is not the end of it: the service
+                # can serve its own page and only then bounce to /reauth, so wait
+                # for the URL to hold still before calling it signed in.
+                stable = stable + 1 if url.startswith(prefix) else 0
+                if stable >= 2:
                     break
     finally:
         try:
@@ -143,15 +184,24 @@ def probe_login():
             log(f"PROBE warn: could not close tab {tab_id}: {e}")
 
     if not final_url:
-        log("PROBE error: tab never settled on a URL")
+        log(f"PROBE error: tab for {check_url} never settled on a URL")
         return "error"
-    if any(m in final_url for m in markers):
-        log(f"PROBE result: LOGGED OUT (settled at {final_url})")
+    result = classify(final_url, check_url)
+    verdict = {"logged_out": "LOGGED OUT", "logged_in": "logged in"}.get(result, "ambiguous ->")
+    log(f"PROBE result: {verdict} for {check_url} (settled at {final_url})")
+    return result
+
+
+def classify(final_url, check_url):
+    """Where the tab ended up -> 'logged_in' | 'logged_out' | 'error'.
+
+    Sign-in markers are checked BEFORE the origin, because the bounce that matters
+    most (a service-scoped re-auth demand) can land on the service's own origin.
+    """
+    if any(m in final_url for m in SIGNIN_MARKERS[PLATFORM]):
         return "logged_out"
-    if final_url.startswith(prefix):
-        log(f"PROBE result: logged in (settled at {final_url})")
+    if final_url.startswith(_origin(check_url)):
         return "logged_in"
-    log(f"PROBE ambiguous: settled at {final_url} -> treating as error")
     return "error"
 
 
