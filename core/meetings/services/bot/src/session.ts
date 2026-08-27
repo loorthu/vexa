@@ -29,6 +29,7 @@ import {
   type AuthPlatform,
 } from '@vexa/remote-browser';
 import { startDebugView } from '@vexa/join';
+import { createTabReaper, type CdpTarget } from './tab-reaper.js';
 import { spawn, type ChildProcess } from 'child_process';
 
 const SAVE_INTERVAL_MS = Number(process.env.SESSION_SAVE_INTERVAL_MS || 60_000);
@@ -39,6 +40,9 @@ const SAVE_INTERVAL_MS = Number(process.env.SESSION_SAVE_INTERVAL_MS || 60_000);
 // connect to http://vexa-browser-session-<uid>:9223 (meeting-api's BROWSER_SESSION_CDP_PORT).
 const CDP_RELAY_PORT = Number(process.env.CDP_RELAY_PORT || 9223);
 const CHROME_CDP_PORT = 9222;
+// Tabs a bot left behind are swept on the same beat as the cookie snapshot. SESSION_REAP_TABS=0
+// turns the sweep off (the tabs then accumulate, as they did before this existed).
+const REAP_TABS = (process.env.SESSION_REAP_TABS ?? '1') !== '0';
 
 function startCdpRelay(): ChildProcess {
   const relay = spawn('socat', [
@@ -48,6 +52,23 @@ function startCdpRelay(): ChildProcess {
   relay.on('error', (err) => console.log(`[browser-session] CDP relay (socat) failed to start: ${err.message}`));
   relay.on('exit', (code) => { if (code) console.log(`[browser-session] CDP relay exited with code ${code}`); });
   return relay;
+}
+
+/** Raw CDP HTTP against our own Chrome — sees targets opened by every client, including the bots'
+ *  separate CDP connections, which this process's Playwright handle does not own. */
+async function cdpJson(path: string): Promise<Response> {
+  return fetch(`http://127.0.0.1:${CHROME_CDP_PORT}${path}`);
+}
+
+async function listCdpTargets(): Promise<CdpTarget[]> {
+  const res = await cdpJson('/json');
+  if (!res.ok) throw new Error(`/json returned ${res.status}`);
+  return (await res.json()) as CdpTarget[];
+}
+
+async function closeCdpTarget(id: string): Promise<void> {
+  const res = await cdpJson(`/json/close/${id}`);
+  if (!res.ok) throw new Error(`/json/close returned ${res.status}`);
 }
 
 function resolvePlatform(): AuthPlatform {
@@ -114,7 +135,29 @@ export async function runSession(env: NodeJS.ProcessEnv = process.env): Promise<
       console.log(`[browser-session] cookie snapshot (${reason}) failed: ${err.message}`);
     }
   };
-  const autoSave = setInterval(() => { void snapshot('auto'); }, SAVE_INTERVAL_MS);
+  // Everything open right now is the human's — this process's own tab, plus whatever they left up
+  // over VNC. The reaper never touches these; it only sweeps tabs that appear LATER and settle on a
+  // post-meeting landing page, which is what a bot leaves behind when it dies without tearing down.
+  const protectedIds = new Set<string>();
+  if (REAP_TABS) {
+    try {
+      for (const t of await listCdpTargets()) protectedIds.add(t.id);
+      console.log(`[browser-session] tab reaper armed (${protectedIds.size} existing target(s) protected)`);
+    } catch (err: any) {
+      console.log(`[browser-session] tab reaper NOT armed (could not read targets): ${err.message}`);
+    }
+  }
+  const reaper = createTabReaper({
+    protectedIds,
+    listTargets: listCdpTargets,
+    closeTarget: closeCdpTarget,
+    log: (m) => console.log(`[browser-session] ${m}`),
+  });
+
+  const autoSave = setInterval(() => {
+    void snapshot('auto');
+    if (REAP_TABS && protectedIds.size > 0) void reaper.tick();
+  }, SAVE_INTERVAL_MS);
 
   let shuttingDown = false;
   const shutdown = async (sig: string) => {

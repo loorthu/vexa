@@ -9,10 +9,15 @@
  *   • the watchdog does NOT fire when the worker finishes inside the grace (a clean leave keeps
  *     its normal exit code);
  *   • SIGINT is wired identically; release() detaches the listeners;
- *   • the grace resolver honours BOT_SIGTERM_GRACE_MS and stays under 25s by default.
+ *   • the grace resolver honours BOT_SIGTERM_GRACE_MS and stays under 25s by default;
+ *   • last rites (onForceExit) run BEFORE the force exit — so the CDP-attached bot's tab in the
+ *     shared session browser is closed even on the path that skips every `finally` — and a hook
+ *     that hangs or throws still exits, exactly once.
  * No browser / redis / signals to the real process. Run: npx tsx src/signals.test.ts
  */
-import { DEFAULT_SIGTERM_GRACE_MS, installSignalHandlers, sigtermGraceMs } from './signals.js';
+import {
+  DEFAULT_LAST_RITES_MS, DEFAULT_SIGTERM_GRACE_MS, installSignalHandlers, sigtermGraceMs,
+} from './signals.js';
 
 let failed = 0;
 const check = (name: string, cond: boolean, detail = '') => {
@@ -98,11 +103,65 @@ const main = async () => {
     check('SIGINT → orchestrator.stop("stopped")', stops.length === 1 && stops[0] === 'stopped');
   }
 
+  // ── last rites: the tab gets closed even on the force-exit path ──
+  {
+    const proc = new FakeProc();
+    const closed: string[] = [];
+    installSignalHandlers({
+      stop: () => { /* wedged: never completes */ }, graceMs: 30, lastRitesMs: 200, proc, log: () => {},
+      onForceExit: () => { closed.push('tab'); },
+    });
+    proc.emit('SIGTERM');
+    await sleep(80);
+    check('force exit runs last rites (tab closed)', closed.length === 1, JSON.stringify(closed));
+    check('and still exits 1 exactly once', proc.exits.length === 1 && proc.exits[0] === 1,
+      JSON.stringify(proc.exits));
+  }
+
+  // ── last rites that HANG must not hold the exit past their own bound ──
+  {
+    const proc = new FakeProc();
+    installSignalHandlers({
+      stop: () => { /* wedged */ }, graceMs: 20, lastRitesMs: 40, proc, log: () => {},
+      onForceExit: () => new Promise<void>(() => { /* never resolves */ }),
+    });
+    proc.emit('SIGTERM');
+    await sleep(40);
+    check('a hung hook does not exit early', proc.exits.length === 0, JSON.stringify(proc.exits));
+    await sleep(60);
+    check('hung last rites → exit 1 once the bound elapses', proc.exits.length === 1 && proc.exits[0] === 1,
+      JSON.stringify(proc.exits));
+  }
+
+  // ── last rites that THROW must not swallow the exit ──
+  {
+    const proc = new FakeProc();
+    installSignalHandlers({
+      stop: () => { /* wedged */ }, graceMs: 20, lastRitesMs: 500, proc, log: () => {},
+      onForceExit: () => { throw new Error('tab already gone'); },
+    });
+    proc.emit('SIGTERM');
+    await sleep(60);
+    check('a throwing hook still force-exits 1', proc.exits.length === 1 && proc.exits[0] === 1,
+      JSON.stringify(proc.exits));
+  }
+
+  // ── no hook wired: unchanged behaviour ──
+  {
+    const proc = new FakeProc();
+    installSignalHandlers({ stop: () => { /* wedged */ }, graceMs: 20, proc, log: () => {} });
+    proc.emit('SIGTERM');
+    await sleep(60);
+    check('without a hook the watchdog exits 1 as before', proc.exits.length === 1 && proc.exits[0] === 1);
+  }
+
   // ── grace resolver: env override; default bounded under the runtime's 30s stop grace ──
   check('default grace = 20s (<25s bound)', DEFAULT_SIGTERM_GRACE_MS === 20_000 && DEFAULT_SIGTERM_GRACE_MS < 25_000);
   check('BOT_SIGTERM_GRACE_MS override', sigtermGraceMs({ BOT_SIGTERM_GRACE_MS: '12000' } as never) === 12_000);
   check('bad override falls back to default', sigtermGraceMs({ BOT_SIGTERM_GRACE_MS: 'nope' } as never) === 20_000);
   check('non-positive override falls back to default', sigtermGraceMs({ BOT_SIGTERM_GRACE_MS: '0' } as never) === 20_000);
+  check('last-rites bound is small (runs after the grace is already blown)',
+    DEFAULT_LAST_RITES_MS === 2_000 && DEFAULT_LAST_RITES_MS < DEFAULT_SIGTERM_GRACE_MS);
 };
 
 main().then(() => {

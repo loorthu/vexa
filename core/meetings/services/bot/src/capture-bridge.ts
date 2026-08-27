@@ -141,6 +141,26 @@ export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
     };
   }
 
+  // From here on the tab EXISTS but nobody owns it yet: the composition root only gets a handle
+  // when this function returns, and its `finally` closes what it was handed. A throw in the wiring
+  // below would therefore strand a tab in the shared session browser with no one left to close it,
+  // so every failure past this point tears down what it opened before rethrowing.
+  try {
+    return await wireSession(context, page, closeBrowser, inv);
+  } catch (e) {
+    await closeBrowser().catch(() => { /* best-effort: the throw below is the real story */ });
+    throw e;
+  }
+}
+
+/** The capture/init-script wiring both acquisition modes share. Split out so launchBrowser can
+ *  guarantee the tab it opened is closed if any of this fails. */
+async function wireSession(
+  context: BrowserContext,
+  page: Page,
+  closeBrowser: () => Promise<void>,
+  inv: Invocation,
+): Promise<BrowserSession> {
   // Voice-agent gate the page reads to decide whether to keep the mic hot (production parity).
   await context.addInitScript(`window.__vexa_voice_agent_enabled = ${!!inv.voiceAgentEnabled};`);
   // Inject the page-side capture bundle on every navigation (defines window.VexaBrowserUtils).

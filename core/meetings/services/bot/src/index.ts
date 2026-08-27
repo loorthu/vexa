@@ -240,7 +240,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   // force-exit watchdog in signals.ts (<25s, inside the runtime's SIGTERM→SIGKILL stop grace) so
   // a wedged teardown can never ride a `docker stop` all the way to a silent 137 (the incident's
   // exit code on BOTH orphaned bots). Wire before run(); release the listeners after.
-  const releaseSignals = installSignalHandlers({ stop: (reason) => orchestrator.stop(reason) });
+  const releaseSignals = installSignalHandlers({
+    stop: (reason) => orchestrator.stop(reason),
+    // The force-exit path skips the `finally` below, so say the last rites here: a CDP-attached bot
+    // holds a tab in the SHARED session browser, and nothing else ever closes it.
+    onForceExit: () => session?.close(),
+  });
   try {
     const result = await orchestrator.run({ maxActiveMs: deriveMaxActiveMs(inv) });
     return result.exitCode;

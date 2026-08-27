@@ -23,6 +23,10 @@
 
 export const DEFAULT_SIGTERM_GRACE_MS = 20_000;
 
+/** How long last rites get before the force exit happens anyway. Small on purpose: this runs
+ *  AFTER the grace is already blown, so it must not push the exit past the runtime's SIGKILL. */
+export const DEFAULT_LAST_RITES_MS = 2_000;
+
 /** The bounded grace for a signal-triggered leave (<25s, under the runtime's 30s stop grace).
  *  Override with BOT_SIGTERM_GRACE_MS (ms). */
 export function sigtermGraceMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -42,6 +46,14 @@ export interface SignalOptions {
   stop: (reason: 'stopped') => void;
   /** Force-exit bound in ms; defaults to BOT_SIGTERM_GRACE_MS / 20s. */
   graceMs?: number;
+  /** Last rites: cleanup that must still happen when the graceful path wedged and we are about to
+   *  `process.exit`, which runs no `finally`. The case that made this necessary: a CDP-attached bot
+   *  borrows a tab in the SHARED session browser, and only its own teardown closes it — force-exit
+   *  without this strands that tab in the human's browser forever, and they accumulate one per
+   *  wedged bot. Bounded by lastRitesMs; a throw or a hang here still exits. */
+  onForceExit?: () => void | Promise<void>;
+  /** Bound for onForceExit; defaults to DEFAULT_LAST_RITES_MS (2s). */
+  lastRitesMs?: number;
   /** Injectable process stand-in (tests); defaults to the real `process`. */
   proc?: SignalTarget;
   log?: (msg: string) => void;
@@ -54,8 +66,30 @@ export interface SignalOptions {
 export function installSignalHandlers(opts: SignalOptions): () => void {
   const proc = opts.proc ?? (process as unknown as SignalTarget);
   const graceMs = opts.graceMs ?? sigtermGraceMs();
+  const lastRitesMs = opts.lastRitesMs ?? DEFAULT_LAST_RITES_MS;
   const log = opts.log ?? ((m: string) => console.error(m));
   let watchdog: ReturnType<typeof setTimeout> | null = null;
+
+  /** Exit 1, but give onForceExit a bounded chance first. Exits exactly once, whether last rites
+   *  resolve, reject, or never finish. */
+  const forceExit = () => {
+    log(`[bot] graceful leave did not complete within ${graceMs}ms — force exit 1`);
+    if (!opts.onForceExit) {
+      proc.exit(1);
+      return;
+    }
+    let exited = false;
+    const exitOnce = () => { if (!exited) { exited = true; proc.exit(1); } };
+    const bail = setTimeout(() => {
+      log(`[bot] last rites did not finish within ${lastRitesMs}ms — exiting anyway`);
+      exitOnce();
+    }, lastRitesMs);
+    bail.unref?.();
+    Promise.resolve()
+      .then(() => opts.onForceExit!())
+      .catch((e) => log(`[bot] last rites failed (exiting anyway): ${String(e)}`))
+      .finally(() => { clearTimeout(bail); exitOnce(); });
+  };
 
   const onSignal = () => {
     log(`[bot] termination signal — triggering graceful leave (force-exit watchdog ${graceMs}ms)`);
@@ -63,10 +97,7 @@ export function installSignalHandlers(opts: SignalOptions): () => void {
       opts.stop('stopped');
     } finally {
       if (watchdog == null) {
-        watchdog = setTimeout(() => {
-          log(`[bot] graceful leave did not complete within ${graceMs}ms — force exit 1`);
-          proc.exit(1);
-        }, graceMs);
+        watchdog = setTimeout(forceExit, graceMs);
         watchdog.unref?.();
       }
     }
