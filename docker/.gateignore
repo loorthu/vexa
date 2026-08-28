@@ -1,0 +1,2 @@
+SPI's air-gap build output (image tarballs under airgap/dist). Untracked build artifacts that
+outlive a single build, so the per-directory gates have nothing to say about them.

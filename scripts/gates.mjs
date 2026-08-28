@@ -14,6 +14,22 @@ import { createHash } from "node:crypto";
 const ROOT = process.cwd();
 const SKIP = new Set(["node_modules", "dist", ".turbo", "__pycache__", "test-results", "playwright-report", "coverage"]);
 const skippable = (name) => name.startsWith(".") || SKIP.has(name);
+// Directories git is told to ignore are not source: model caches, build output, and whatever a
+// container left behind running as root. The gates walk the FILESYSTEM, so without this they
+// judge the machine rather than the repository — a 2.9G faster-whisper cache fails gate:readme
+// on a checkout where nothing is wrong, and the directory is often not even writable by the
+// person being asked to add a README to it. Ignored means "not ours to describe".
+const ignoredDirs = (() => {
+  try {
+    const out = execSync("git ls-files --others --ignored --directory --exclude-standard", {
+      cwd: ROOT, encoding: "utf8", maxBuffer: 32 * 1024 * 1024,
+    });
+    return new Set(out.split("\n").filter((l) => l.endsWith("/")).map((l) => join(ROOT, l.slice(0, -1))));
+  } catch {
+    return new Set();   // no git, or a worktree it cannot read — fall back to walking everything
+  }
+})();
+
 const rel = (p) => p.slice(ROOT.length + 1) || ".";
 const fail = (msgs) => { for (const m of msgs) console.error("  ✗ " + m); return false; };
 
@@ -23,6 +39,7 @@ function walkDirs(dir = ROOT, acc = []) {
     const p = join(dir, name);
     let s; try { s = statSync(p); } catch { continue; }
     if (s.isDirectory()) {
+      if (ignoredDirs.has(p)) continue;                  // git-ignored: machine-local, not source
       if (existsSync(join(p, ".gateignore"))) continue;   // vendored subtree — opted out of the per-dir gates (refactor pending)
       acc.push(p); walkDirs(p, acc);
     }
