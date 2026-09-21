@@ -18,6 +18,15 @@ services:
       - "${TRANSCRIPTION_LB_PORT:-8083}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    # nginx:alpine is musl-based, and musl gives up on a single-label name once the host's
+    # search domain misses: this host's resolv.conf carries `search <domain>` + `ndots:2`, so
+    # `transcription-worker-1` is looked up as `transcription-worker-1.<domain>` (NXDOMAIN) and
+    # never retried bare. nginx resolves upstreams at config-load time, so it dies outright with
+    # "host not found in upstream" and crash-loops -- while the worker beside it is healthy.
+    # glibc containers on the same network resolve the very same name fine, which is what makes
+    # this look like anything but DNS. ndots:0 tries the name as absolute first, so Docker's
+    # embedded resolver answers before the search domain is ever appended.
+    dns_opt: ["ndots:0"]
     depends_on:
       - transcription-worker-1
     restart: unless-stopped
@@ -38,6 +47,7 @@ services:
       - VAD_MIN_SILENCE_DURATION_MS=${VAD_MIN_SILENCE_DURATION_MS:-80}
     volumes:
       - transcription-models:/app/models
+    dns_opt: ["ndots:0"]   # see transcription-api above
     deploy:
       resources:
         reservations:

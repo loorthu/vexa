@@ -7,7 +7,12 @@ PROJECT ?= vexa-v012
 BROWSER_IMAGE ?= mock-bot:dev
 EMAIL ?= self-host@vexa.ai
 SCOPES ?= bot,tx
-COMPOSE  = docker compose -p $(PROJECT) -f docker-compose.yml
+# Site override, included automatically when present (see docker-compose.spi.yml).
+# Some sites need per-service compose settings for the stack to come up at all — at SPI a
+# studio DNS record shadows the `redis` service name — and wiring it in here means every
+# target (dev/up/down/bot/ps/logs) gets it, rather than each caller remembering a second -f.
+SITE_OVERRIDE := $(wildcard docker-compose.spi.yml)
+COMPOSE  = docker compose -p $(PROJECT) -f docker-compose.yml $(foreach f,$(SITE_OVERRIDE),-f $(f))
 # Install pulls the published bot (vexaai/vexa-bot:v012 — release-validated since v0.12.1).
 # `make bot` builds from source into the LOCAL namespace (vexa/, like vexa/meet-join-env:dev) so a
 # source build can never shadow the published pointer (#569).

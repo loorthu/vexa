@@ -1,0 +1,44 @@
+# SPI site override — DNS only.
+#
+# The Makefile includes this file automatically whenever it is present, so
+# `make dev` / `make up` / `make down` / `make bot` all pick it up. It is
+# COMMITTED rather than left as a local file on purpose: without it the stack
+# does not start at all on an SPI host, and an untracked file does not survive
+# a machine rebuild.
+#
+# WHY THIS EXISTS
+# ---------------
+# Containers inherit `search spimageworks.com` and `options ndots:2` from the
+# host's /etc/resolv.conf. Under glibc, a name with fewer dots than `ndots` is
+# tried against the search list BEFORE being tried as-is. The compose service
+# name `redis` has zero dots, so the resolver asks for `redis.spimageworks.com`
+# first — and at SPI that name really resolves (10.5.240.74, a studio host).
+# That answer wins, and Docker's embedded DNS at 127.0.0.11, which would have
+# returned the redis CONTAINER, is never consulted.
+#
+# `redis` is the ONLY collision today — postgres, minio, gateway, runtime and
+# terminal are all NXDOMAIN in studio DNS, which is why nothing else broke.
+#
+# The failure does not look like DNS. Connections to the studio host simply
+# time out, so `runtime` logs "scheduler tick error: Timeout connecting to
+# server", never becomes healthy, and compose then refuses to start everything
+# that depends_on it — gateway, meeting-api, agent-api, mcp and terminal —
+# aborting with "dependency failed to start".
+#
+# ndots:0 makes the resolver try every name as absolute FIRST, so the embedded
+# DNS answers `redis` with the container address before the search domain is
+# appended. Applied to every service so a new cross-service reference cannot
+# quietly reintroduce the bug.
+
+services:
+  admin-api:   {dns_opt: ["ndots:0"]}
+  agent-api:   {dns_opt: ["ndots:0"]}
+  gateway:     {dns_opt: ["ndots:0"]}
+  mcp:         {dns_opt: ["ndots:0"]}
+  meeting-api: {dns_opt: ["ndots:0"]}
+  minio:       {dns_opt: ["ndots:0"]}
+  minio-init:  {dns_opt: ["ndots:0"]}
+  postgres:    {dns_opt: ["ndots:0"]}
+  redis:       {dns_opt: ["ndots:0"]}
+  runtime:     {dns_opt: ["ndots:0"]}
+  terminal:    {dns_opt: ["ndots:0"]}
