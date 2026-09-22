@@ -656,6 +656,15 @@ export class VideoRecordingService {
       '-vcodec', 'mjpeg',
       '-framerate', String(this.fps),
       '-i', '-',
+      // Round the frame down to even dimensions before yuv420p. Page.startScreencast PRESERVES
+      // ASPECT RATIO when fitting the page into maxWidth/maxHeight, so an odd-shaped viewport
+      // yields an odd-sized frame — and libx264 refuses to open on one ("width not divisible
+      // by 2"). ffmpeg then exits 1 before writing a byte, and because the recorder's only
+      // output was the empty final-chunk sentinel the failure looked like a recording that had
+      // been made and lost: DNA's chunk index read `complete: true` with `chunks: []`, and the
+      // collector reported "nothing staged to finalize" while the audio beside it was perfect.
+      // Scaling (not cropping) keeps the whole frame; at most one pixel per axis is lost.
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
       '-c:v', 'libx264',
       '-preset', 'veryfast',
       '-crf', '26',
