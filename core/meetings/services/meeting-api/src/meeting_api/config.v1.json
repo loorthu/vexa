@@ -76,6 +76,20 @@
    "description": "shared secret for internal service-to-service calls (x-internal-secret on the self-driven lifecycle callback)"
   },
   {
+   "key": "BROWSER_SESSION_NAME_PREFIX",
+   "class": "defaulted",
+   "default": "vexa-browser-session-",
+   "targets": [],
+   "description": "name prefix of the per-user authenticated session browser an `authenticated` bot attaches to over CDP; the container is <prefix><user_id> and browser-session.sh creates it under the same name. An in-code dial: no deploy surface plumbs it, because the name is a contract between this service and that script rather than a deployment choice"
+  },
+  {
+   "key": "BROWSER_SESSION_CDP_PORT",
+   "class": "defaulted",
+   "default": "9223",
+   "targets": [],
+   "description": "CDP port on that session-browser container, so the spawned bot is handed http://<prefix><user_id>:<port>. An in-code dial for the same reason as BROWSER_SESSION_NAME_PREFIX"
+  },
+  {
    "key": "TRANSCRIPTION_SERVICE_URL",
    "class": "capability",
    "capability": "stt",
