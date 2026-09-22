@@ -29,16 +29,73 @@
 # DNS answers `redis` with the container address before the search domain is
 # appended. Applied to every service so a new cross-service reference cannot
 # quietly reintroduce the bug.
+#
+# THE SAME COLLISION, FOR CONTAINERS COMPOSE DOES NOT CREATE
+# ----------------------------------------------------------
+# `dns_opt` only reaches services in this file. Meeting bots are NOT compose
+# services — meeting-api creates them through the Docker API
+# (bot_spawn/service.py), which sets no DNS options, so every bot container
+# inherits the host resolver and resolves `redis` to the studio host. The bot
+# then cannot reach redis, and BOTH halves of a meeting break, silently, in
+# ways that do not look like DNS:
+#
+#   * TRANSCRIPTS. The bot posts audio to the STT service (an IP — that part
+#     works) and gets segments back, then publishes them to the
+#     `transcription_segments` redis stream. That publish is what fails: the
+#     stream stays at entries-added=0, nothing reaches the transcriptions
+#     table, and the UI shows a meeting that recorded but said nothing.
+#   * EJECT. DELETE /bots publishes the bot's `leave` act on redis pub/sub
+#     (bot_commands:meeting:{id}) and the bot subscribes over redis. With redis
+#     unreachable the act never arrives, so the bot never leaves cleanly, never
+#     closes the meeting tab it opened in the shared session browser — the tab
+#     being watched over noVNC — and meeting-api reaps the container by force
+#     about 30s later.
+#
+# Fixed here rather than in bot_spawn because it needs no code change and no
+# daemon restart: give redis a second name that studio DNS does NOT answer for,
+# and hand the bot THAT name. `vexa-redis.spimageworks.com` is NXDOMAIN, so the
+# search domain misses and the embedded resolver answers with the container.
+# meeting-api's REDIS_URL is the one that matters — it is passed down to each
+# bot it spawns — but the others are set alike so a future spawner cannot
+# quietly reintroduce this.
+#
+# The durable alternative is `"dns-opts": ["ndots:0"]` in /etc/docker/daemon.json,
+# which fixes every container on the host including spawned ones. It needs root
+# and a daemon restart, and this host's daemon.json carries no dns-opts today.
 
 services:
   admin-api:   {dns_opt: ["ndots:0"]}
-  agent-api:   {dns_opt: ["ndots:0"]}
-  gateway:     {dns_opt: ["ndots:0"]}
   mcp:         {dns_opt: ["ndots:0"]}
-  meeting-api: {dns_opt: ["ndots:0"]}
   minio:       {dns_opt: ["ndots:0"]}
   minio-init:  {dns_opt: ["ndots:0"]}
   postgres:    {dns_opt: ["ndots:0"]}
-  redis:       {dns_opt: ["ndots:0"]}
-  runtime:     {dns_opt: ["ndots:0"]}
   terminal:    {dns_opt: ["ndots:0"]}
+
+  redis:
+    dns_opt: ["ndots:0"]
+    # The second name bots resolve by. `redis` alone is answered by studio DNS.
+    networks:
+      vexa:
+        aliases: [vexa-redis]
+
+  meeting-api:
+    dns_opt: ["ndots:0"]
+    # THIS one reaches the bots: bot_spawn passes its own REDIS_URL down to each
+    # container it creates, and that container has no ndots:0 of its own.
+    environment:
+      REDIS_URL: redis://vexa-redis:6379/0
+
+  runtime:
+    dns_opt: ["ndots:0"]
+    environment:
+      REDIS_URL: redis://vexa-redis:6379/0
+
+  gateway:
+    dns_opt: ["ndots:0"]
+    environment:
+      REDIS_URL: redis://vexa-redis:6379/0
+
+  agent-api:
+    dns_opt: ["ndots:0"]
+    environment:
+      VEXA_REDIS_URL: redis://vexa-redis:6379/0
